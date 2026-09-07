@@ -1,0 +1,12 @@
+[Unit]
+Description=Block public access to MCPHub :3100 (host network mode binds 0.0.0.0; only nginx may proxy it)
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/iptables -C INPUT -p tcp --dport 3100 ! -s 127.0.0.1 -j DROP || /usr/sbin/iptables -A INPUT -p tcp --dport 3100 ! -s 127.0.0.1 -j DROP
+ExecStop=/usr/sbin/iptables -D INPUT -p tcp --dport 3100 ! -s 127.0.0.1 -j DROP
+
+[Install]
+WantedBy=multi-user.target
