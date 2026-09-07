@@ -108,6 +108,7 @@ services:
     restart: unless-stopped
     network_mode: host   # 需要访问 127.0.0.1 上的后端 MCP
     environment:
+      HOST: 127.0.0.1   # 只绑回环，公网只能走 nginx :443
       PORT: "3100"
       BASE_PATH: /hub
       ADMIN_PASSWORD: ${MCPHUB_ADMIN_PASSWORD:?在 .env 里配置}
