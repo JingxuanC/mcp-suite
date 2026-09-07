@@ -8,6 +8,8 @@ WorkingDirectory=/var/www/causal-memory-website
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=HOSTNAME=127.0.0.1
+# dashboard 签发的 token 桥接到 causal-memory 租户库（哈希模式，见 memory-bridge.ts）
+Environment=CM_TOKENS_BRIDGE=/opt/mcp-suite/causal-memory/tokens/cloud.json
 ExecStart=/usr/bin/npx next start --port 3000 --hostname 127.0.0.1
 Restart=always
 RestartSec=3

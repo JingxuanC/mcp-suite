@@ -129,7 +129,8 @@ services:
       TZ: Asia/Shanghai
       CAUSAL_MEMORY_HTTP_AUTH_TOKEN: ${CAUSAL_MEMORY_HTTP_AUTH_TOKEN}
       # 多租户模式：/mcp bearer 鉴权 + 每租户独立 DB（tenants/ 子目录）
-      CAUSAL_MEMORY_TOKENS_FILE: /tokens/tokens.json
+      # 目录模式：合并 /tokens 下全部 *.json（tokens.json=运维手工管理，cloud.json=官网 dashboard 桥接）
+      CAUSAL_MEMORY_TOKENS_FILE: /tokens
     volumes:
       # causal-memory 忽略 XDG_DATA_HOME，固定写 $HOME/.local/share/causal-memory
       - /opt/mcp-suite/causal-memory/cm-data-home:/root/.local/share/causal-memory
