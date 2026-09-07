@@ -16,3 +16,8 @@ causal-memory-src/
 usage/
 *.log
 crontab.bak.*
+
+# 服务器运行时遗留（数据卷/临时产物）
+causal-memory/cm-data-home/
+causal-memory/.auth-token
+causal-memory/Dockerfile
