@@ -39,6 +39,8 @@ for line in raw.splitlines():
     if line.startswith("data: "):
         print(line[6:])
         break
+else:
+    print(raw)  # 同步轻任务返回纯 JSON（非 SSE）
 PY
 }
 
