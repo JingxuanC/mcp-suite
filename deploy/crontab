@@ -1,0 +1,8 @@
+# mcp-suite 定时任务（安装：crontab deploy/crontab；脚本读 /opt/mcp-suite/.env 里的 MCP_LICENSE_KEY）
+# 数据更新：交易日 15:40 盘后首跑 + 18:10 补跑（覆盖率不达标会自动保留旧数据，双跑提高容错）
+40 15 * * 1-5 /opt/mcp-suite/deploy/cron_tasks.sh update_data >> /opt/mcp-suite/update_data.cron.log 2>&1
+10 18 * * 1-5 /opt/mcp-suite/deploy/cron_tasks.sh update_data >> /opt/mcp-suite/update_data.cron.log 2>&1
+# 在线因子：交易日 20:00（等 18:10 的 update_data 完成）
+0 20 * * 1-5 /opt/mcp-suite/deploy/cron_tasks.sh daily_compute >> /opt/mcp-suite/cron_tasks.log 2>&1
+# 衰减巡检：每周日 10:00
+0 10 * * 0 /opt/mcp-suite/deploy/cron_tasks.sh weekly_ic >> /opt/mcp-suite/cron_tasks.log 2>&1

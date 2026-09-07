@@ -1,0 +1,119 @@
+# Athena MCP 套件聚合部署（causal-memory.com/hub 统一入口）
+# 构建: docker compose build
+# 启动: docker compose up -d
+# 密钥不进仓库：licenses.json 挂卷注入；MCPHub admin 密码走 .env（MCPHUB_ADMIN_PASSWORD）
+x-common: &common
+  restart: unless-stopped
+  environment:
+    TZ: Asia/Shanghai
+    MCP_LICENSE_FILE: /app/licenses/licenses.json
+    MCP_USAGE_DIR: /app/usage
+    MCP_WORKERS: "2"
+
+services:
+  factor-miner:
+    <<: *common
+    build:
+      context: ./factor-miner-mcp
+      args:
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    image: factor-miner-mcp:server
+    container_name: mcp-factor-miner
+    ports:
+      - "127.0.0.1:50053:50053"
+    environment:
+      TZ: Asia/Shanghai
+      MCP_LICENSE_FILE: /app/licenses/licenses.json
+      MCP_USAGE_DIR: /app/usage
+      MCP_WORKERS: "2"
+      FACTOR_MINER_DATA_DIR: /app/data/factor_mining
+      FACTOR_MINER_MODEL_DIR: /app/models
+      REDIS_URL: redis://host.docker.internal:6379/0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /opt/athena-mcp/qlib_data:/app/.qlib/qlib_data
+      - /opt/athena-mcp/data/factor_mining:/app/data/factor_mining
+      - /opt/athena-mcp/models:/app/models
+      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
+      - /opt/mcp-suite/usage/factor-miner:/app/usage
+
+  astock-data:
+    <<: *common
+    build:
+      context: ./astock-data-mcp
+      args:
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    image: astock-data-mcp:server
+    container_name: mcp-astock-data
+    ports:
+      - "127.0.0.1:50052:50052"
+    volumes:
+      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
+      - /opt/mcp-suite/usage/astock-data:/app/usage
+
+  global-data:
+    <<: *common
+    build:
+      context: ./global-data-mcp
+      args:
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    image: global-data-mcp:server
+    container_name: mcp-global-data
+    ports:
+      - "127.0.0.1:50058:50058"
+    volumes:
+      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
+      - /opt/mcp-suite/usage/global-data:/app/usage
+
+  causal:
+    <<: *common
+    build:
+      context: ./causal-mcp
+      args:
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    image: causal-mcp:server
+    container_name: mcp-causal
+    ports:
+      - "127.0.0.1:50057:50057"
+    volumes:
+      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
+      - /opt/mcp-suite/usage/causal:/app/usage
+
+  kronos:
+    <<: *common
+    build:
+      context: ./kronos-mcp
+      args:
+        HF_ENDPOINT: https://hf-mirror.com
+    image: kronos-mcp:latest
+    container_name: mcp-kronos
+    ports:
+      - "127.0.0.1:50059:50059"
+    volumes:
+      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
+      - /opt/mcp-suite/usage/kronos:/app/usage
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    # 纯 dfactor 缓存（TTL 48h），无需持久化
+
+  mcphub:
+    image: samanhappy/mcphub:latest
+    container_name: mcphub
+    restart: unless-stopped
+    network_mode: host   # 需要访问 127.0.0.1 上的后端 MCP
+    environment:
+      PORT: "3100"
+      BASE_PATH: /hub
+      ADMIN_PASSWORD: ${MCPHUB_ADMIN_PASSWORD:?在 .env 里配置}
+    volumes:
+      - /opt/mcp-hub/mcp_settings.json:/app/mcp_settings.json
+      - /opt/mcp-hub/data:/app/data
+
+  # causal-memory 不走容器：systemd 裸二进制（见 systemd/causal-memory.service）
+  # 官网 Next.js 同理（systemd/causal-memory-web.service）

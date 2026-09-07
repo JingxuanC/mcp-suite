@@ -1,0 +1,17 @@
+[Unit]
+Description=causal-memory.com Next.js website
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/causal-memory-website
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+ExecStart=/usr/bin/npx next start --port 3000 --hostname 127.0.0.1
+Restart=always
+RestartSec=3
+MemoryMax=900M
+
+[Install]
+WantedBy=multi-user.target

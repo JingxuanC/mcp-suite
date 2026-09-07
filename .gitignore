@@ -1,0 +1,4 @@
+.env
+*.bak
+mcphub/mcp_settings.json
+__pycache__/
