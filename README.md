@@ -27,7 +27,7 @@ causal-memory.com (nginx, 443)
 | `systemd/` | 官网 Next.js 单元（causal-memory 本体已容器化） |
 | `deploy/crontab` + `deploy/cron_tasks.sh` | 数据更新/在线因子/IC 巡检定时任务 |
 | `mcphub/mcp_settings.example.json` | MCPHub 后端服务器 + 分组模板 |
-| `causal-memory/tokens/tokens.example.json` | 租户 token 映射模板（热更新，fail-closed） |
+| `causal-memory/tokens.example.json` | 租户 token 映射模板（热更新，fail-closed；目录模式：tokens/ 下所有 *.json 合并，官网桥接写 cloud.json） |
 | `licenses/licenses.example.json` | 数据服务 license key 模板 |
 | `.env.example` | 编排层密钥模板 |
 
@@ -46,7 +46,7 @@ git clone <causal-memory>    causal-memory-src   # Rust 仓，用 Dockerfile.ser
 # 2. 生成真实配置（模板 → 实体，实体被 gitignore）
 cp .env.example .env && $EDITOR .env                       # 填 3 个密钥
 cp licenses/licenses.example.json /opt/athena-mcp/licenses/licenses.json  # 生成 ak_ key
-cp causal-memory/tokens/tokens.example.json causal-memory/tokens/tokens.json
+mkdir -p causal-memory/tokens && cp causal-memory/tokens.example.json causal-memory/tokens/tokens.json
 cp mcphub/mcp_settings.example.json /opt/mcp-hub/mcp_settings.json
 
 # 3. 启动

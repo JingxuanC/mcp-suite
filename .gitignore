@@ -1,6 +1,6 @@
 # 真实密钥/配置，永不提交（用 *.example 模板生成）
 .env
-causal-memory/tokens/tokens.json
+causal-memory/tokens/
 licenses/licenses.json
 mcphub/mcp_settings.json
 
