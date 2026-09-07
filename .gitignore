@@ -1,4 +1,18 @@
+# 真实密钥/配置，永不提交（用 *.example 模板生成）
 .env
-*.bak
+causal-memory/tokens/tokens.json
+licenses/licenses.json
 mcphub/mcp_settings.json
-__pycache__/
+
+# 服务源码（各自独立仓库，按 README 克隆，不用 submodule）
+factor-miner-mcp/
+astock-data-mcp/
+global-data-mcp/
+causal-mcp/
+kronos-mcp/
+causal-memory-src/
+
+# 数据与运行产物
+usage/
+*.log
+crontab.bak.*

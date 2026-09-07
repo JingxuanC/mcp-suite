@@ -4,7 +4,9 @@
       "type": "streamable-http",
       "url": "http://127.0.0.1:50052/mcp",
       "description": "A股全维数据：行情/资金流/涨停打板/龙虎榜/财报F10/研报/期权（45 工具）",
-      "headers": { "X-License-Key": "${MCP_LICENSE_KEY}" },
+      "headers": {
+        "X-License-Key": "<LICENSE_KEY>"
+      },
       "owner": "admin",
       "visibility": "public"
     },
@@ -12,7 +14,9 @@
       "type": "streamable-http",
       "url": "http://127.0.0.1:50053/mcp",
       "description": "A股因子挖掘：沙箱执行/qlib回测/OOS准入/组合优化",
-      "headers": { "X-License-Key": "${MCP_LICENSE_KEY}" },
+      "headers": {
+        "X-License-Key": "<LICENSE_KEY>"
+      },
       "owner": "admin",
       "visibility": "public"
     },
@@ -20,7 +24,9 @@
       "type": "streamable-http",
       "url": "http://127.0.0.1:50057/mcp",
       "description": "A股因果分析：事件研究/DoWhy反事实验证/因果图学习（8 工具）",
-      "headers": { "X-License-Key": "${MCP_LICENSE_KEY}" },
+      "headers": {
+        "X-License-Key": "<LICENSE_KEY>"
+      },
       "owner": "admin",
       "visibility": "public"
     },
@@ -28,7 +34,9 @@
       "type": "streamable-http",
       "url": "http://127.0.0.1:50058/mcp",
       "description": "美股+宏观舆情：yfinance/财报/FRED/Reddit/StockTwits/Polymarket（14 工具）",
-      "headers": { "X-License-Key": "${MCP_LICENSE_KEY}" },
+      "headers": {
+        "X-License-Key": "<LICENSE_KEY>"
+      },
       "owner": "admin",
       "visibility": "public"
     },
@@ -36,46 +44,155 @@
       "type": "streamable-http",
       "url": "http://127.0.0.1:50059/mcp",
       "description": "Kronos K线时序基础模型：零样本 OHLCV 预测/交易信号",
-      "headers": { "X-License-Key": "${MCP_LICENSE_KEY}" },
+      "headers": {
+        "X-License-Key": "<LICENSE_KEY>"
+      },
       "owner": "admin",
       "visibility": "public"
     },
     "causal-memory": {
       "type": "streamable-http",
-      "url": "http://127.0.0.1:9938/mcp",
+      "url": "http://127.0.0.1:50061/mcp",
       "description": "Agent 因果记忆：decision→outcome 因果边，抗上下文压缩（17 工具）",
+      "headers": {
+        "Authorization": "Bearer <CAUSAL_MEMORY_TENANT_TOKEN>"
+      },
       "owner": "admin",
-      "visibility": "public"
+      "visibility": "private"
     },
     "fetch": {
       "command": "uvx",
-      "args": ["mcp-server-fetch"],
-      "description": "网页抓取转 markdown",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "description": "网页抓取转 markdown（外部公共 MCP）",
       "owner": "admin",
       "visibility": "public"
     },
     "time": {
       "command": "uvx",
-      "args": ["mcp-server-time"],
-      "description": "时区/时间计算",
+      "args": [
+        "mcp-server-time"
+      ],
+      "description": "时区/时间计算（外部公共 MCP）",
       "owner": "admin",
       "visibility": "public"
     },
     "sequential-thinking": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-      "description": "结构化多步推理",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "description": "结构化多步推理（外部公共 MCP）",
       "owner": "admin",
       "visibility": "public"
     }
   },
   "groups": [
-    { "id": "REPLACE_UUID_1", "name": "data", "description": "只读数据类：A股全维数据 + 美股宏观舆情", "servers": ["astock-data", "global-data"], "owner": "admin" },
-    { "id": "REPLACE_UUID_2", "name": "alpha", "description": "重计算研究向：因子挖掘 + K线预测 + 因果分析", "servers": ["factor-miner", "kronos", "causal"], "owner": "admin" },
-    { "id": "REPLACE_UUID_3", "name": "memory", "description": "causal-memory Agent 记忆基础设施", "servers": ["causal-memory"], "owner": "admin" }
+    {
+      "id": "1987d4c8-3519-5895-820d-d54b521bc553",
+      "name": "data",
+      "description": "只读数据类：A股全维数据 + 美股宏观舆情",
+      "servers": [
+        "astock-data",
+        "global-data"
+      ],
+      "owner": "admin"
+    },
+    {
+      "id": "0d1b7602-abcd-531c-ae08-a4438be6ab69",
+      "name": "alpha",
+      "description": "重计算研究向：因子挖掘 + K线预测 + 因果分析",
+      "servers": [
+        "factor-miner",
+        "kronos",
+        "causal"
+      ],
+      "owner": "admin"
+    },
+    {
+      "id": "6e5f925c-cfb7-54e6-8a5a-0fb4173adc20",
+      "name": "memory",
+      "description": "causal-memory Agent 记忆基础设施",
+      "servers": [
+        "causal-memory"
+      ],
+      "owner": "admin"
+    }
   ],
   "systemConfig": {
-    "routing": { "enableBearerAuth": true, "skipAuth": false },
-    "install": { "baseUrl": "https://causal-memory.com/hub" }
-  }
+    "routing": {
+      "enableBearerAuth": true,
+      "skipAuth": false
+    },
+    "oauthServer": {
+      "enabled": true,
+      "accessTokenLifetime": 3600,
+      "refreshTokenLifetime": 1209600,
+      "authorizationCodeLifetime": 300,
+      "requireClientSecret": true,
+      "allowedScopes": [
+        "read",
+        "write"
+      ],
+      "requireState": false,
+      "dynamicRegistration": {
+        "enabled": true,
+        "allowedGrantTypes": [
+          "authorization_code",
+          "refresh_token"
+        ],
+        "requiresAuthentication": false
+      },
+      "clientIdMetadata": {
+        "enabled": false,
+        "cacheTtlMs": 3600000
+      }
+    },
+    "smartRouting": {
+      "enabled": false,
+      "dbUrl": "",
+      "openaiApiBaseUrl": "",
+      "openaiApiKey": "",
+      "openaiApiEmbeddingModel": ""
+    },
+    "toolResultCompression": {
+      "enabled": false,
+      "minTokens": 2000,
+      "maxOutputTokens": 1200,
+      "strategy": "auto"
+    },
+    "install": {
+      "baseUrl": "https://causal-memory.com/hub"
+    },
+    "mcpRouter": {
+      "apiKey": "",
+      "referer": "https://www.mcphub.app",
+      "title": "MCPHub",
+      "baseUrl": "https://api.mcprouter.to/v1"
+    },
+    "auth": {
+      "betterAuth": {}
+    }
+  },
+  "users": [
+    {
+      "username": "admin",
+      "password": "<BCRYPT_HASH>",
+      "isAdmin": true
+    }
+  ],
+  "bearerKeys": [
+    {
+      "id": "0291b318-9168-4eca-8d4e-6d37f77ba4c1",
+      "name": "admin-all",
+      "token": "<MCPHUB_KEY>",
+      "enabled": true,
+      "kind": "system",
+      "accessType": "all",
+      "allowedGroups": [],
+      "allowedServers": []
+    }
+  ]
 }

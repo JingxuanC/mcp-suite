@@ -115,5 +115,23 @@ services:
       - /opt/mcp-hub/mcp_settings.json:/app/mcp_settings.json
       - /opt/mcp-hub/data:/app/data
 
-  # causal-memory 不走容器：systemd 裸二进制（见 systemd/causal-memory.service）
-  # 官网 Next.js 同理（systemd/causal-memory-web.service）
+  # 官网 Next.js 走 systemd 裸进程（见 systemd/causal-memory-web.service），不在本编排内
+
+  causal-memory:
+    build:
+      context: ./causal-memory-src
+      dockerfile: Dockerfile.server
+    image: causal-memory:server
+    container_name: mcp-causal-memory
+    ports:
+      - "127.0.0.1:50061:50061"
+    environment:
+      TZ: Asia/Shanghai
+      CAUSAL_MEMORY_HTTP_AUTH_TOKEN: ${CAUSAL_MEMORY_HTTP_AUTH_TOKEN}
+      # 多租户模式：/mcp bearer 鉴权 + 每租户独立 DB（tenants/ 子目录）
+      CAUSAL_MEMORY_TOKENS_FILE: /tokens/tokens.json
+    volumes:
+      # causal-memory 忽略 XDG_DATA_HOME，固定写 $HOME/.local/share/causal-memory
+      - /opt/mcp-suite/causal-memory/cm-data-home:/root/.local/share/causal-memory
+      - /opt/mcp-suite/causal-memory/tokens:/tokens:ro
+    restart: unless-stopped

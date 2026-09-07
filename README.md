@@ -1,92 +1,89 @@
-# mcp-suite 部署仓库
+# mcp-suite — causal-memory.com 基础设施
 
-Athena 量化 MCP 套件的部署即代码（infra as code）：`https://causal-memory.com/hub/mcp` 统一入口背后的全部部署配置。
+causal-memory.com 整套 MCP 服务的部署编排。本仓只含**编排与配置模板**；
+各 MCP 服务源码在各自独立仓库，按下方清单克隆到本目录即可构建。
 
 ## 架构
 
 ```
-用户 → https://causal-memory.com/hub/mcp (Bearer token, MCPHub 鉴权/分组/审计)
-         └─ nginx 443 → MCPHub (127.0.0.1:3100, BASE_PATH=/hub)
-              ├─ astock-data   :50052  A股全维数据（45 工具）
-              ├─ factor-miner  :50053  因子挖掘/qlib回测/LGBM（16 工具）
-              ├─ causal        :50057  因果分析（8 工具）
-              ├─ global-data   :50058  美股/宏观/舆情（14 工具）
-              ├─ kronos        :50059  Kronos K线零样本预测（4 工具）
-              ├─ causal-memory :9938   Agent 记忆（17 工具，systemd 裸二进制）
-              └─ fetch / time / sequential-thinking（stdio 外部 MCP）
+causal-memory.com (nginx, 443)
+ ├── /               → Next.js 官网 (:3000, systemd 裸进程)
+ ├── /hub/           → MCPHub 聚合网关 (:3100, 统一入口 + 用户/分组/Key 管理)
+ ├── /memory/mcp     → causal-memory (:50061, Bearer 多租户, 每租户独立 SQLite)
+ ├── /astock/mcp     → astock-data-mcp (:50052, 45 工具, X-License-Key 鉴权)
+ ├── /factor-miner/mcp → factor-miner-mcp (:50053, 16 工具, 含 qlib 回测)
+ ├── /causal/mcp     → causal-mcp (:50057, 8 工具)
+ └── /global/mcp     → global-data-mcp (:50058, 14 工具)
+
+每个服务暴露 /metrics（Prometheus 文本，免鉴权，仅监听 127.0.0.1）
 ```
 
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
-| `docker-compose.yml` | 全部容器服务（6 MCP + Redis + MCPHub） |
-| `deploy/crontab` | 定时任务定义（`crontab deploy/crontab` 安装） |
-| `deploy/cron_tasks.sh` | 周期任务统一入口：update_data / daily_compute / weekly_ic |
-| `systemd/` | causal-memory（MCP HTTP）+ 官网 Next.js 的 service 单元 |
-| `nginx/causal-memory.conf` | 443 终结 + 路径路由（/hub/ 透传 MCPHub，/astock/ 等直连单服务） |
-| `mcphub/mcp_settings.example.json` | MCPHub 配置模板（分组/可见性/bearerAuth/baseUrl） |
+| `docker-compose.yml` | 全部容器服务编排 |
+| `nginx/causal-memory.conf` | 统一入口反代（SSE 透传、/memory 需固定 Host 头防 rmcp DNS 重绑定拦截） |
+| `systemd/` | 官网 Next.js 单元（causal-memory 本体已容器化） |
+| `deploy/crontab` + `deploy/cron_tasks.sh` | 数据更新/在线因子/IC 巡检定时任务 |
+| `mcphub/mcp_settings.example.json` | MCPHub 后端服务器 + 分组模板 |
+| `causal-memory/tokens/tokens.example.json` | 租户 token 映射模板（热更新，fail-closed） |
+| `licenses/licenses.example.json` | 数据服务 license key 模板 |
+| `.env.example` | 编排层密钥模板 |
 
-## 密钥管理（不入库）
-
-| 密钥 | 位置 |
-|---|---|
-| 后端 MCP license key | `/opt/athena-mcp/licenses/licenses.json`（挂卷只读注入） |
-| cron 用 license key | `/opt/mcp-suite/.env` 的 `MCP_LICENSE_KEY`（gitignore） |
-| MCPHub admin 密码 | `.env` 的 `MCPHUB_ADMIN_PASSWORD`（compose 注入） |
-| 用户 bearer key | MCPHub 面板/API 签发，存于 `/opt/mcp-hub/mcp_settings.json` 的 `bearerKeys` |
-
-## 数据挂载审计（容器服务的数据全部落宿主机）
-
-| 数据 | 宿主机路径 | 容器路径 | 用途 |
-|---|---|---|---|
-| qlib cn_data | `/opt/athena-mcp/qlib_data` | `/app/.qlib/qlib_data` | 日线原始+前复权（update_data 增量更新） |
-| 因子 h5 数据集 | `/opt/athena-mcp/data/factor_mining` | `/app/data/factor_mining` | daily_pv_all.h5 / debug.h5 |
-| LGBM 模型 | `/opt/athena-mcp/models` | `/app/models` | lgbm_rolling.pkl |
-| license 用量计数 | `/opt/mcp-suite/usage/<svc>` | `/app/usage` | 每服务独立 |
-| MCPHub 配置/状态 | `/opt/mcp-hub/` | `/app/mcp_settings.json`、`/app/data` | 含 bearerKeys，勿覆盖 |
-| causal-memory DB | `/opt/causal-memory/data` | —（systemd） | causal.db |
-| kronos 模型权重 | —（镜像内预下载） | `/models` | 换 KRONOS_MODEL 才需重下 |
-| Redis | —（纯缓存 TTL 48h） | — | dfactor:{symbol} |
-
-## 定时任务
-
-| 时间 | 任务 | 说明 |
-|---|---|---|
-| 交易日 15:40 / 18:10 | `update_data` | qlib cn_data 增量更新 + h5 重建；覆盖率不足自动保留旧数据 |
-| 交易日 20:00 | `factor_daily_compute` | 在线因子（reversal20）写 Redis `dfactor:*` |
-| 周日 10:00 | `factor_recent_ic` | reversal20 近 60 日截面 IC 衰减巡检，结果在 `cron_tasks.log` |
-
-安装/更新：`crontab deploy/crontab`（会先备份当前 crontab 到 `/opt/mcp-suite/crontab.bak.<ts>`，见下）。
-
-## 运维备忘（踩过的坑）
-
-1. **MCPHub `enableKeepAlive` 别开**：自研后端不实现 `ping`，keepalive 会触发指数级重连风暴
-2. **MCPHub `groups` 必须是数组**（文档示例是对象，对象会让分组路由 `groups.find is not a function` 挂死）
-3. **`bearerKeys` 存在 `mcp_settings.json` 里**：改配置必须原地编辑（先备份），直接覆盖会抹掉所有用户 key
-4. **后端 URL 是 127.0.0.1 时 server 必须有 `owner: "admin"`**，否则 SSRF 保护拦截
-5. **子路径部署**：MCPHub 设 `BASE_PATH=/hub` + nginx `proxy_pass` 不带尾斜杠（完整透传）
-6. **factor-miner 的 HAS_LGB 是 import 时判定**：装/修 lightgbm 后必须重启容器
-7. **update_data 的 h5 重建失败只记日志**：看 `manifest.json` 的 `h5_sha256` 是否非空来确认数据健康
-
-## 新机器部署
+## 全新服务器部署
 
 ```bash
-# 1. 克隆各 MCP 服务仓库到 /opt/mcp-suite/<repo>（astock-data-mcp / factor-miner-mcp /
-#    causal-mcp / global-data-mcp / kronos-mcp），本仓库也放 /opt/mcp-suite
-# 2. 配置密钥
-mkdir -p /opt/athena-mcp/{licenses,qlib_data,data/factor_mining,models}
-cp licenses.json /opt/athena-mcp/licenses/
-echo 'MCP_LICENSE_KEY=ak_xxx' > /opt/mcp-suite/.env
-echo 'MCPHUB_ADMIN_PASSWORD=xxx' >> /opt/mcp-suite/.env
+# 1. 克隆本仓 + 各服务源码（目录名与 compose build context 一致）
+git clone <this-repo> /opt/mcp-suite && cd /opt/mcp-suite
+git clone <factor-miner-mcp> factor-miner-mcp
+git clone <astock-data-mcp>  astock-data-mcp
+git clone <global-data-mcp>  global-data-mcp
+git clone <causal-mcp>       causal-mcp
+git clone <kronos-mcp>       kronos-mcp
+git clone <causal-memory>    causal-memory-src   # Rust 仓，用 Dockerfile.server 构建
+
+# 2. 生成真实配置（模板 → 实体，实体被 gitignore）
+cp .env.example .env && $EDITOR .env                       # 填 3 个密钥
+cp licenses/licenses.example.json /opt/athena-mcp/licenses/licenses.json  # 生成 ak_ key
+cp causal-memory/tokens/tokens.example.json causal-memory/tokens/tokens.json
+cp mcphub/mcp_settings.example.json /opt/mcp-hub/mcp_settings.json
+
 # 3. 启动
-cd /opt/mcp-suite && docker compose build && docker compose up -d
-# 4. systemd + nginx + cron
-cp systemd/*.service /etc/systemd/system/ && systemctl daemon-reload
-cp nginx/causal-memory.conf /etc/nginx/conf.d/ && nginx -t && systemctl reload nginx
-crontab -l > /opt/mcp-suite/crontab.bak.$(date +%s) 2>/dev/null; crontab deploy/crontab
-# 5. 初始化数据集
-docker exec mcp-factor-miner python3 -m factor_miner.gen_data --debug
-docker exec mcp-factor-miner python3 -m factor_miner.gen_data --full
-# 6. MCPHub 用户 key：面板 https://<domain>/hub/ 或 POST /api/auth/keys
+docker compose build && docker compose up -d
+
+# 4. nginx + TLS
+cp nginx/causal-memory.conf /etc/nginx/conf.d/ && certbot --nginx -d causal-memory.com
+
+# 5. 定时任务
+crontab deploy/crontab
+
+# 6. 官网（可选）
+cp systemd/causal-memory-web.service /etc/systemd/system/ && systemctl enable --now causal-memory-web
 ```
+
+## 运维速查
+
+**加 MCPHub 用户 Key**（客户端只需这一把，后端 token 全藏在 hub 配置里）：
+
+```bash
+docker exec mcphub node bin/cli.js login --url http://localhost:3100/hub --username admin
+docker exec mcphub node bin/cli.js keys create --name <用户> --access-type groups --groups data,alpha
+```
+
+分组：`data`(A股+全球数据) / `alpha`(因子+Kronos+因果) / `memory`(因果记忆)。
+⚠️ `memory` 分组路由到 hub 配置里 baked 的租户库——要独立记忆须走下一条。
+
+**加 causal-memory 租户**（独立记忆库）：
+编辑 `causal-memory/tokens/tokens.json` 加 `"<token>": "<租户名>"`，保存即热生效（mtime 触发，无需重启）。
+然后在 MCPHub 建 `owner=该用户, visibility=private` 的 causal-memory server，headers 填 `Authorization: Bearer <token>`。
+
+**轮换 license key**：改 `/opt/athena-mcp/licenses/licenses.json`（各服务热读，无需重启），同步改 mcphub 配置里的 `X-License-Key`。
+
+**更新某个服务**：`cd <服务目录> && git pull && cd .. && docker compose up -d --build <服务名>`。
+
+## 铁律
+
+- 真实 `.env` / `tokens.json` / `licenses.json` / `mcp_settings.json` **永不提交**，只提交 `*.example` 模板
+- 所有后端只监听 `127.0.0.1`，公网只露 nginx 443
+- qlib 数据（qlib_data）与 factor_mining 数据量大，不入库，挂卷注入

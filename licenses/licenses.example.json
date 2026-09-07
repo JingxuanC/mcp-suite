@@ -1,0 +1,9 @@
+{
+ "keys": {
+  "ak_REPLACE_WITH_GENERATED_KEY": {
+   "name": "owner",
+   "daily_quota": 0,
+   "heavy_quota": 0
+  }
+ }
+}
