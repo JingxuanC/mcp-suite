@@ -273,6 +273,21 @@ class QuotaPlatformTest(unittest.TestCase):
                              rpc_call('t'), token='tok-alice')
             self.assertEqual(s, 200)
 
+    def test_admin_lookup_key(self):
+        s, raw = self.call(self.admin_port, 'POST', '/api/lookup_key',
+                           json.dumps({'token': 'tok-alice'}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 200)
+        self.assertEqual(json.loads(raw)['name'], 'alice')
+        # 响应不含 token 本体
+        self.assertNotIn('tok-alice', raw.decode())
+        s, _ = self.call(self.admin_port, 'POST', '/api/lookup_key',
+                         json.dumps({'token': 'nope'}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 404)
+        # 未鉴权不可用
+        s, _ = self.call(self.admin_port, 'POST', '/api/lookup_key',
+                         json.dumps({'token': 'tok-alice'}).encode())
+        self.assertEqual(s, 401)
+
     def test_inventory_masked(self):
         _, raw = self.call(self.admin_port, 'GET', '/api/state', admin_token='secret-test')
         state = json.loads(raw)
