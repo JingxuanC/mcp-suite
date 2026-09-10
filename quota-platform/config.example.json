@@ -1,19 +1,51 @@
 {
   "upstream": "http://127.0.0.1:3100",
-  "data_plane": { "host": "0.0.0.0", "port": 3200 },
-  "admin_plane": { "host": "0.0.0.0", "port": 3300 },
+  "data_plane": {
+    "host": "0.0.0.0",
+    "port": 3200
+  },
+  "admin_plane": {
+    "host": "0.0.0.0",
+    "port": 3300
+  },
   "admin_token": "change-me",
   "mcp_settings_path": "/mnt/mcp_settings.json",
   "groups": {
-    "data": { "tier": "free" },
-    "alpha": { "tier": "paid" },
-    "memory": { "tier": "paid" }
+    "data": {
+      "tier": "free"
+    },
+    "alpha": {
+      "tier": "paid"
+    },
+    "memory": {
+      "tier": "paid"
+    }
   },
   "tiers": {
-    "free":    { "daily": 1000000, "monthly": 30000000, "heavy_daily": null },
-    "paid":    { "daily": 2000,    "monthly": 40000,    "heavy_daily": 200 },
-    "default": { "daily": 500,     "monthly": 5000,     "heavy_daily": 50 }
+    "free": {
+      "daily": 1000000,
+      "monthly": 30000000,
+      "heavy_daily": null
+    },
+    "paid": {
+      "daily": 2000,
+      "monthly": 40000,
+      "heavy_daily": 200
+    },
+    "default": {
+      "daily": 500,
+      "monthly": 5000,
+      "heavy_daily": 50
+    }
   },
   "key_overrides": {},
-  "heavy_tools": ["backtest_run", "factor_mining", "ai_deep_research"]
+  "heavy_tools": [
+    "factor_execute",
+    "factor_backtest",
+    "factor_oos_check",
+    "factor_daily_compute",
+    "ml_train_rolling",
+    "update_data",
+    "forecast_batch"
+  ]
 }

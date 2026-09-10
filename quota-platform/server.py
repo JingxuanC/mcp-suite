@@ -19,6 +19,7 @@ quota-platform — MCP 调用统一配额管控平台（sidecar proxy，零第�
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -71,7 +72,10 @@ DEFAULT_CONFIG = {
         'default': {'daily': 500,     'monthly': 5000,     'heavy_daily': 50},
     },
     'key_overrides': {},                       # 按 key 名覆盖：{"bot-a": {"tier_by_group": {"alpha": {...}}}}
-    'heavy_tools': ['backtest_run', 'factor_mining', 'ai_deep_research'],  # 重度工具名单
+    # 重度工具名单（与 mcp-suite 各服务 ASYNC_TOOLS 对齐）
+    'heavy_tools': ['factor_execute', 'factor_backtest', 'factor_oos_check',
+                    'factor_daily_compute', 'ml_train_rolling', 'update_data',
+                    'forecast_batch'],
 }
 
 
@@ -494,8 +498,9 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
     def _authed(self):
         token = self.headers.get('X-Admin-Token', '')
         cfg = self.server.cfg.current()
-        ok = token and hashlib.sha256(token.encode()).hexdigest() == \
-            hashlib.sha256(str(cfg.get('admin_token', '')).encode()).hexdigest()
+        ok = token and hmac.compare_digest(
+            hashlib.sha256(token.encode()).digest(),
+            hashlib.sha256(str(cfg.get('admin_token', '')).encode()).digest())
         if not ok:
             self._json(401, {'error': 'unauthorized'})
         return ok
@@ -525,6 +530,16 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         if path == '/api/reload_inventory':
             self.server.inventory.reload()
             return self._json(200, {'ok': True, 'keys': len(self.server.inventory.all_masked())})
+        if path == '/api/lookup_key':
+            length = int(self.headers.get('Content-Length') or 0)
+            try:
+                req = json.loads(self.rfile.read(length) or b'{}')
+            except json.JSONDecodeError:
+                return self._json(400, {'error': 'invalid_json'})
+            info = self.server.inventory.lookup(str(req.get('token', '')))
+            if not info:
+                return self._json(404, {'error': 'key_not_found'})
+            return self._json(200, info)  # inventory 不存 token 本体，天然脱敏
         if path == '/api/config':
             length = int(self.headers.get('Content-Length') or 0)
             try:
