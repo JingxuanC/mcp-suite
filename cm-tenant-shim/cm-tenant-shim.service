@@ -1,0 +1,12 @@
+[Unit]
+Description=causal-memory tenant shim (mcphub passthrough header fix)
+After=network.target docker.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/mcp-suite/cm-tenant-shim/shim.py
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

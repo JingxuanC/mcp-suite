@@ -30,6 +30,7 @@ causal-memory.com (nginx, 443)
 | `deploy/crontab` + `deploy/cron_tasks.sh` | 数据更新/在线因子/IC 巡检定时任务 |
 | `mcphub/mcp_settings.example.json` | MCPHub 后端服务器 + 分组模板 |
 | `causal-memory/tokens.example.json` | 租户 token 映射模板（热更新，fail-closed；目录模式：tokens/ 下所有 *.json 合并，官网桥接写 cloud.json） |
+| `cm-tenant-shim/` | causal-memory 租户路由 shim（127.0.0.1:51061，解 MCPHub 双 bearer 拼接；见运维速查） |
 | `licenses/licenses.example.json` | 数据服务 license key 模板 |
 | `.env.example` | 编排层密钥模板 |
 
@@ -98,9 +99,13 @@ QUOTA_ADMIN_TOKEN=$(grep QUOTA_ADMIN_TOKEN .env | cut -d= -f2) \
 
 各服务 `licenses.json` 的 daily 配额保持保守大值即可（LicenseStore 已退化为全局兜底，quota-platform 挂了也不裸奔）。
 
-**加 causal-memory 租户**（独立记忆库）：
-编辑 `causal-memory/tokens/tokens.json` 加 `"<token>": "<租户名>"`，保存即热生效（mtime 触发，无需重启）。
-然后在 MCPHub 建 `owner=该用户, visibility=private` 的 causal-memory server，headers 填 `Authorization: Bearer <token>`。
+**causal-memory 租户隔离**（每个 MCPHub key 独立记忆库，2026-09 起）：
+
+- 原理：MCPHub 的 causal-memory 条目配 `headers`(静态 admin token) + `passthroughHeaders: ["Authorization"]`，调用时 hub 会把两个 bearer 拼成 `"Bearer admin, Bearer <调用者key>"`；`cm-tenant-shim/`（127.0.0.1:51061，systemd 单元 `cm-tenant-shim.service`）取**最后一个** bearer 转发给 causal-memory:50061 → 调用者落到自己租户；hub 自己的工具发现无调用者上下文，只有静态 admin 头，正常注册。
+- 加租户：`causal-memory/tokens/tokens.json` 加 `"<该用户的 MCPHub key>": "<租户名>"`，保存即热生效（mtime 触发，无需重启任何服务）。未登记的 key 调记忆工具直接 401（fail closed）。
+- 客户端零改动：用户仍只持自己那把 MCPHub key。
+- ⚠️ 不要给 causal-memory 条目去掉静态头（工具发现会 401 触发 hub 的 OAuth 误探测），也不要指望 mcphub 1.0.34 的 passthrough 单独工作（无静态头时 passthrough 不生效）。
+- 旁路：`/memory/mcp` 直连仍走租户 token（不经过 hub/shim）。
 
 **轮换 license key**：改 `/opt/athena-mcp/licenses/licenses.json`（各服务热读，无需重启），同步改 mcphub 配置里的 `X-License-Key`。
 
