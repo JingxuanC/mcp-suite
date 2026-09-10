@@ -88,6 +88,14 @@ docker restart quota-platform        # 改 /opt/mcp-suite/quota-platform/config.
 curl -s 127.0.0.1:3200/healthz      # 数据面健康检查
 ```
 
+**上线自检**（quota-platform 部署/重启后，用真实 key 端到端验证配额链路）：
+
+```bash
+QUOTA_ADMIN_TOKEN=$(grep QUOTA_ADMIN_TOKEN .env | cut -d= -f2) \
+  python3 quota-platform/scripts/verify_quota.py --key <一把真实用户 key>
+# 全部 PASS（退出码 0）即可放心切 nginx /hub/ → :3200；FAIL 时按脚本报错逐条排查
+```
+
 各服务 `licenses.json` 的 daily 配额保持保守大值即可（LicenseStore 已退化为全局兜底，quota-platform 挂了也不裸奔）。
 
 **加 causal-memory 租户**（独立记忆库）：
