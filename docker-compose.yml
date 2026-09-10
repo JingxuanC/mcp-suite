@@ -115,6 +115,22 @@ services:
       - /opt/mcp-hub/mcp_settings.json:/app/mcp_settings.json
       - /opt/mcp-hub/data:/app/data
 
+  # 统一配额管控：挡在 mcphub 前，per-key × per-group 计量/配额，SSE 透传
+  # nginx /hub/ 改指 :3200，/quota/ 管理台走 :3300（详见 quota-platform/README.md）
+  quota-platform:
+    image: python:3.12-slim
+    container_name: quota-platform
+    restart: unless-stopped
+    network_mode: host   # 与 mcphub 同机：上游 127.0.0.1:3100；nginx 回源 127.0.0.1:3200/3300
+    environment:
+      TZ: Asia/Shanghai
+      QUOTA_ADMIN_TOKEN: ${QUOTA_ADMIN_TOKEN:?在 .env 里配置}
+    volumes:
+      - ./quota-platform:/app
+      - /opt/mcp-hub/mcp_settings.json:/mnt/mcp_settings.json:ro   # key 库存只读挂载
+      - /opt/mcp-suite/quota-platform:/data                        # config.json + quota.db 持久化
+    command: python /app/server.py --config /data/config.json --db /data/quota.db
+
   # 官网 Next.js 走 systemd 裸进程（见 systemd/causal-memory-web.service），不在本编排内
 
   causal-memory:

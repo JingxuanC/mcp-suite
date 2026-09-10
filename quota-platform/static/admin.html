@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quota-platform · 配额管控台</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --text: #d7dae0; --dim: #8a91a0; --accent: #e8b04b; --ok: #4caf7d; --bad: #e05d5d;
+    --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: baseline; gap: 16px; padding: 20px 28px 12px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 18px; font-weight: 600; letter-spacing: .5px; }
+  header h1 em { color: var(--accent); font-style: normal; }
+  header .sub { color: var(--dim); font-size: 12px; }
+  header input { margin-left: auto; background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 6px 10px; width: 220px; font-family: var(--mono); font-size: 12px; }
+  main { padding: 20px 28px 60px; max-width: 1180px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card .num { font: 600 26px/1.2 var(--mono); }
+  .card .lbl { color: var(--dim); font-size: 12px; margin-top: 4px; }
+  .card.warn .num { color: var(--accent); }
+  .card.bad .num { color: var(--bad); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 20px; overflow: hidden; }
+  section h2 { font-size: 13px; font-weight: 600; color: var(--dim); padding: 12px 16px; border-bottom: 1px solid var(--line); letter-spacing: 1px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-family: var(--mono); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11px; border: 1px solid var(--line); color: var(--dim); }
+  .pill.free { color: var(--ok); border-color: var(--ok); }
+  .pill.paid { color: var(--accent); border-color: var(--accent); }
+  .pill.blocked { color: var(--bad); border-color: var(--bad); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  textarea { width: 100%; min-height: 190px; background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font: 12px/1.5 var(--mono); resize: vertical; }
+  .btnrow { display: flex; gap: 10px; align-items: center; padding: 12px 16px; }
+  button { background: var(--accent); color: #14100a; border: none; border-radius: 6px; padding: 7px 18px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+  button:hover { filter: brightness(1.1); }
+  #msg { color: var(--ok); font-size: 12px; }
+  #msg.err { color: var(--bad); }
+  .muted { color: var(--dim); font-size: 12px; }
+  footer { padding: 0 28px 30px; color: var(--dim); font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>quota-platform <em>·</em> 配额管控台</h1>
+  <span class="sub">MCP 调用统一计量 / 配额 / 分组定价</span>
+  <input id="token" type="password" placeholder="管理令牌 (X-Admin-Token)" />
+</header>
+<main>
+  <div class="cards">
+    <div class="card"><div class="num" id="today_calls">–</div><div class="lbl">今日调用</div></div>
+    <div class="card"><div class="num" id="today_heavy">–</div><div class="lbl">今日重度调用</div></div>
+    <div class="card"><div class="num" id="month_calls">–</div><div class="lbl">本月调用</div></div>
+    <div class="card warn"><div class="num" id="blocks">–</div><div class="lbl">24h 拦截次数</div></div>
+    <div class="card"><div class="num" id="keys_active">–</div><div class="lbl">今日活跃 key</div></div>
+    <div class="card"><div class="num" id="keys_total">–</div><div class="lbl">库存 key 总数</div></div>
+  </div>
+
+  <div class="grid2">
+    <section>
+      <h2>今日分组用量</h2>
+      <table><thead><tr><th>分组</th><th class="num">调用</th><th class="num">重度</th><th>套餐档</th></tr></thead>
+      <tbody id="group_usage"></tbody></table>
+    </section>
+    <section>
+      <h2>今日 key 用量 TOP</h2>
+      <table><thead><tr><th>key</th><th>分组</th><th class="num">调用</th><th class="num">重度</th></tr></thead>
+      <tbody id="key_usage"></tbody></table>
+    </section>
+  </div>
+
+  <section>
+    <h2>最近拦截</h2>
+    <table><thead><tr><th>时间</th><th>key</th><th>分组</th><th>原因</th></tr></thead>
+    <tbody id="recent_blocks"></tbody></table>
+  </section>
+
+  <div class="grid2">
+    <section>
+      <h2>配额规则 · tiers（档位定义）</h2>
+      <textarea id="tiers" spellcheck="false"></textarea>
+    </section>
+    <section>
+      <h2>配额规则 · groups（分组→档位）</h2>
+      <textarea id="groups" spellcheck="false"></textarea>
+    </section>
+  </div>
+  <div class="grid2">
+    <section>
+      <h2>配额规则 · key 覆盖</h2>
+      <textarea id="key_overrides" spellcheck="false"></textarea>
+    </section>
+    <section>
+      <h2>重度工具名单</h2>
+      <textarea id="heavy_tools" spellcheck="false" style="min-height:90px"></textarea>
+      <div class="btnrow">
+        <button onclick="saveRules()">保存规则</button>
+        <button class="ghost" onclick="reloadInventory()">重载 key 库存</button>
+        <span id="msg"></span>
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <h2>key 库存（来自 mcphub mcp_settings.json）</h2>
+    <table><thead><tr><th>名称</th><th>属主</th><th>类型</th><th>accessType</th><th>允许分组</th></tr></thead>
+    <tbody id="inventory"></tbody></table>
+    <p class="muted" style="padding:10px 16px">陌生 key 与 OAuth 短期 token 自动落入 anonymous + default 档；完整 token 仅存于 mcphub 侧，本平台只读。</p>
+  </section>
+</main>
+<footer>quota-platform · 数据面 :3200 → mcphub :3100 · 管理面 :3300 · 仅标准库实现</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const tokenInput = $('token');
+tokenInput.value = localStorage.getItem('qp_admin_token') || '';
+tokenInput.addEventListener('change', () => { localStorage.setItem('qp_admin_token', tokenInput.value); load(); });
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { 'X-Admin-Token': tokenInput.value, ...(opts.headers || {}) } });
+  if (r.status === 401) { const e = new Error('管理令牌错误'); e.code = 401; throw e; }
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+function fmt(n) { return (n ?? 0).toLocaleString('en-US'); }
+function fmtTs(ts) { return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }); }
+
+async function load() {
+  let d;
+  try { d = await api('/api/state'); } catch (e) { msg(e.code === 401 ? '管理令牌错误' : '加载失败：' + e.message, true); return; }
+  $('today_calls').textContent = fmt(d.today_calls);
+  $('today_heavy').textContent = fmt(d.today_heavy);
+  $('month_calls').textContent = fmt(d.month_calls);
+  $('blocks').textContent = fmt(d.blocks_24h);
+  $('keys_active').textContent = fmt(d.today_keys);
+  $('keys_total').textContent = fmt(d.inventory.length);
+
+  const tierOf = g => (d.config.groups[g] || {}).tier || 'default';
+  $('group_usage').innerHTML = d.group_usage.map(r =>
+    `<tr><td>${r.group_name}</td><td class="num">${fmt(r.calls)}</td><td class="num">${fmt(r.heavy)}</td>` +
+    `<td><span class="pill ${tierOf(r.group_name)}">${tierOf(r.group_name)}</span></td></tr>`).join('') ||
+    '<tr><td colspan="4" class="muted">今日暂无调用</td></tr>';
+
+  $('key_usage').innerHTML = d.key_usage.map(r =>
+    `<tr><td>${r.key_name}</td><td>${r.group_name}</td><td class="num">${fmt(r.calls)}</td><td class="num">${fmt(r.heavy)}</td></tr>`).join('') ||
+    '<tr><td colspan="4" class="muted">今日暂无调用</td></tr>';
+
+  const reasons = { daily: '日配额', heavy_daily: '重度日配额', monthly: '月配额' };
+  $('recent_blocks').innerHTML = d.recent_blocks.map(b =>
+    `<tr><td class="muted">${fmtTs(b.ts)}</td><td>${b.key_name}</td><td>${b.group_name}</td>` +
+    `<td><span class="pill blocked">${reasons[b.reason] || b.reason}</span></td></tr>`).join('') ||
+    '<tr><td colspan="4" class="muted">暂无拦截</td></tr>';
+
+  $('tiers').value = JSON.stringify(d.config.tiers, null, 2);
+  $('groups').value = JSON.stringify(d.config.groups, null, 2);
+  $('key_overrides').value = JSON.stringify(d.config.key_overrides, null, 2);
+  $('heavy_tools').value = JSON.stringify(d.config.heavy_tools, null, 2);
+
+  $('inventory').innerHTML = d.inventory.map(k =>
+    `<tr><td>${k.name}</td><td>${k.owner || '—'}</td><td>${k.kind}</td><td>${k.accessType}</td>` +
+    `<td>${(k.allowedGroups || []).join(', ') || '全部'}</td></tr>`).join('') ||
+    '<tr><td colspan="5" class="muted">库存为空（检查 mcp_settings.json 挂载）</td></tr>';
+  msg('');
+}
+
+function msg(text, isErr) {
+  const m = $('msg'); m.textContent = text; m.className = isErr ? 'err' : '';
+}
+
+async function saveRules() {
+  let body;
+  try {
+    body = {
+      tiers: JSON.parse($('tiers').value || '{}'),
+      groups: JSON.parse($('groups').value || '{}'),
+      key_overrides: JSON.parse($('key_overrides').value || '{}'),
+      heavy_tools: JSON.parse($('heavy_tools').value || '[]'),
+    };
+  } catch { return msg('JSON 格式错误', true); }
+  try { await api('/api/config', { method: 'POST', body: JSON.stringify(body) }); msg('已保存并生效'); }
+  catch (e) { msg('保存失败：' + e.message, true); }
+}
+
+async function reloadInventory() {
+  try { const r = await api('/api/reload_inventory', { method: 'POST' }); msg(`库存已重载（${r.keys} 个 key）`); load(); }
+  catch (e) { msg('重载失败：' + e.message, true); }
+}
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

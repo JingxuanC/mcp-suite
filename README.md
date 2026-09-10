@@ -8,7 +8,8 @@ causal-memory.com 整套 MCP 服务的部署编排。本仓只含**编排与配�
 ```
 causal-memory.com (nginx, 443)
  ├── /               → Next.js 官网 (:3000, systemd 裸进程)
- ├── /hub/           → MCPHub 聚合网关 (:3100, 统一入口 + 用户/分组/Key 管理)
+ ├── /hub/           → quota-platform (:3200, 统一计量/配额) → MCPHub (:3100, 用户/分组/Key)
+ ├── /quota/         → quota-platform 管理台 (:3300, 令牌鉴权，用量看板+配额规则)
  ├── /memory/mcp     → causal-memory (:50061, Bearer 多租户, 每租户独立 SQLite)
  ├── /astock/mcp     → astock-data-mcp (:50052, 45 工具, X-License-Key 鉴权)
  ├── /factor-miner/mcp → factor-miner-mcp (:50053, 16 工具, 含 qlib 回测)
@@ -24,7 +25,8 @@ causal-memory.com (nginx, 443)
 |---|---|
 | `docker-compose.yml` | 全部容器服务编排 |
 | `nginx/causal-memory.conf` | 统一入口反代（SSE 透传、/memory 需固定 Host 头防 rmcp DNS 重绑定拦截） |
-| `systemd/` | 官网 Next.js 单元（causal-memory 本体已容器化） |
+| `systemd/` | 官网 Next.js 单元 + mcphub/quota 端口防火墙（host 网络下只许 127.0.0.1） |
+| `quota-platform/` | 统一配额管控（sidecar proxy：key 识别→分组→配额→计量，纯标准库） |
 | `deploy/crontab` + `deploy/cron_tasks.sh` | 数据更新/在线因子/IC 巡检定时任务 |
 | `mcphub/mcp_settings.example.json` | MCPHub 后端服务器 + 分组模板 |
 | `causal-memory/tokens.example.json` | 租户 token 映射模板（热更新，fail-closed；目录模式：tokens/ 下所有 *.json 合并，官网桥接写 cloud.json） |
@@ -44,7 +46,7 @@ git clone <kronos-mcp>       kronos-mcp
 git clone <causal-memory>    causal-memory-src   # Rust 仓，用 Dockerfile.server 构建
 
 # 2. 生成真实配置（模板 → 实体，实体被 gitignore）
-cp .env.example .env && $EDITOR .env                       # 填 3 个密钥
+cp .env.example .env && $EDITOR .env                       # 填 4 个密钥
 cp licenses/licenses.example.json /opt/athena-mcp/licenses/licenses.json  # 生成 ak_ key
 mkdir -p causal-memory/tokens && cp causal-memory/tokens.example.json causal-memory/tokens/tokens.json
 cp mcphub/mcp_settings.example.json /opt/mcp-hub/mcp_settings.json
@@ -55,10 +57,13 @@ docker compose build && docker compose up -d
 # 4. nginx + TLS
 cp nginx/causal-memory.conf /etc/nginx/conf.d/ && certbot --nginx -d causal-memory.com
 
-# 5. 定时任务
+# 5. 防火墙（host 网络的 mcphub/quota 端口只许本机，公网只露 nginx 443）
+cp systemd/mcphub-firewall.service /etc/systemd/system/ && systemctl enable --now mcphub-firewall
+
+# 6. 定时任务
 crontab deploy/crontab
 
-# 6. 官网（可选）
+# 7. 官网（可选）
 cp systemd/causal-memory-web.service /etc/systemd/system/ && systemctl enable --now causal-memory-web
 ```
 
@@ -74,6 +79,17 @@ docker exec mcphub node bin/cli.js keys create --name <用户> --access-type gro
 分组：`data`(A股+全球数据) / `alpha`(因子+Kronos+因果) / `memory`(因果记忆)。
 ⚠️ `memory` 分组路由到 hub 配置里 baked 的租户库——要独立记忆须走下一条。
 
+**配额与用量**（quota-platform，替代逐个服务改 licenses.json）：
+
+```bash
+# 管理台: https://causal-memory.com/quota/ （令牌 = .env 的 QUOTA_ADMIN_TOKEN）
+# 规则模型: 组(data=free / alpha+memory=paid) × 档(daily/monthly/heavy_daily) × key 覆盖
+docker restart quota-platform        # 改 /opt/mcp-suite/quota-platform/config.json 后重载（管理台保存则即时生效）
+curl -s 127.0.0.1:3200/healthz      # 数据面健康检查
+```
+
+各服务 `licenses.json` 的 daily 配额保持保守大值即可（LicenseStore 已退化为全局兜底，quota-platform 挂了也不裸奔）。
+
 **加 causal-memory 租户**（独立记忆库）：
 编辑 `causal-memory/tokens/tokens.json` 加 `"<token>": "<租户名>"`，保存即热生效（mtime 触发，无需重启）。
 然后在 MCPHub 建 `owner=该用户, visibility=private` 的 causal-memory server，headers 填 `Authorization: Bearer <token>`。
@@ -84,6 +100,6 @@ docker exec mcphub node bin/cli.js keys create --name <用户> --access-type gro
 
 ## 铁律
 
-- 真实 `.env` / `tokens.json` / `licenses.json` / `mcp_settings.json` **永不提交**，只提交 `*.example` 模板
-- 所有后端只监听 `127.0.0.1`，公网只露 nginx 443
+- 真实 `.env` / `tokens.json` / `licenses.json` / `mcp_settings.json` / `quota-platform/config.json` **永不提交**，只提交 `*.example` 模板
+- 所有后端只监听 `127.0.0.1`，公网只露 nginx 443（host 网络端口由 mcphub-firewall 兜底）
 - qlib 数据（qlib_data）与 factor_mining 数据量大，不入库，挂卷注入
