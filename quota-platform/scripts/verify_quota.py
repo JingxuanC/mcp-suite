@@ -67,6 +67,28 @@ def rpc_call(tool, req_id=1):
                        'params': {'name': tool, 'arguments': {}}}).encode()
 
 
+def mcp_open(base, path, auth):
+    """开 streamable-http 会话，返回 (sid, headers)。initialize/initialized 不计配额。"""
+    h = dict(auth)
+    h.update({'Content-Type': 'application/json',
+              'Accept': 'application/json, text/event-stream'})
+    s, hdrs, _ = req(base, 'POST', path, body=json.dumps({
+        'jsonrpc': '2.0', 'id': 0, 'method': 'initialize',
+        'params': {'protocolVersion': '2025-03-26', 'capabilities': {},
+                   'clientInfo': {'name': 'verify-quota', 'version': '0'}}}).encode(),
+        headers=h, timeout=30)
+    if s != 200:
+        return None, h
+    sid = hdrs.get('Mcp-Session-Id') or hdrs.get('mcp-session-id')
+    h2 = dict(h)
+    if sid:
+        h2['Mcp-Session-Id'] = sid
+    req(base, 'POST', path, body=json.dumps(
+        {'jsonrpc': '2.0', 'method': 'notifications/initialized'}).encode(),
+        headers=h2, timeout=30)
+    return sid, h2
+
+
 def main():
     ap = argparse.ArgumentParser(description='quota-platform 上线验证')
     ap.add_argument('--base', default='http://127.0.0.1:3200', help='数据面地址')
@@ -76,6 +98,8 @@ def main():
     ap.add_argument('--group-alpha', default='alpha', help='收费组名（默认 alpha）')
     ap.add_argument('--admin-token', default=os.environ.get('QUOTA_ADMIN_TOKEN', ''),
                     help='管理令牌（默认取环境变量 QUOTA_ADMIN_TOKEN）')
+    ap.add_argument('--db', default='/opt/mcp-suite/quota-platform/quota.db',
+                    help='quota.db 路径（只读，用于把临时 heavy_daily 设为 当前用量+1，避免当天残留用量干扰验证）')
     args = ap.parse_args()
 
     if not args.admin_token:
@@ -122,8 +146,22 @@ def main():
     # 记录原 key_overrides，验证后恢复
     saved_overrides = json.dumps({'key_overrides': state.get('config', {}).get('key_overrides', {})})
 
-    print('■ 阶段 2：临时收紧测试 key 配额（alpha 组 daily=10 / heavy_daily=1）')
-    test_limits = {'daily': 10, 'monthly': 1000, 'heavy_daily': 1}
+    print('■ 阶段 2：临时收紧测试 key 配额（alpha 组 daily=大量 / heavy_daily=今日已用+1）')
+    # heavy_daily 不能写死：当天验证/业务可能已产生用量。只读 quota.db 取今日已用，
+    # 临时档设为 已用+1 —— 正好再放行 1 次、第 2 次应 429。
+    day_heavy = 0
+    try:
+        import sqlite3
+        con = sqlite3.connect(f'file:{args.db}?mode=ro', uri=True)
+        row = con.execute(
+            "SELECT heavy FROM usage WHERE period = strftime('%Y-%m-%d','now') "
+            'AND key_name = ? AND group_name = ?', (key_name, args.group_alpha)).fetchone()
+        con.close()
+        day_heavy = row[0] if row else 0
+    except OSError as e:
+        print(f'  警告：读不到 quota.db（{e}），heavy_daily 按 1 处理，若今日已有重度用量第 4 阶段会误报')
+    # 普通调用不限（避免当天残留用量误伤），只测重度拦截
+    test_limits = {'daily': None, 'monthly': None, 'heavy_daily': day_heavy + 1}
     overrides = state.get('config', {}).get('key_overrides', {})
     overrides = dict(overrides)
     entry = dict(overrides.get(key_name, {}))
@@ -137,50 +175,62 @@ def main():
         return finish(c)
 
     print(f'■ 阶段 3：免费组放行（{args.group_data} × 3 次普通调用）')
+    data_path = f'/hub/mcp/{args.group_data}'
+    sid, data_h = mcp_open(args.base, data_path, auth)
+    c.check('免费组会话建立', sid is not None, f'POST {data_path} initialize')
     data_ok = 0
-    for i in range(3):
-        try:
-            s, _, raw = req(args.base, 'POST', f'/{args.group_data}/messages',
-                            body=rpc_call('get_price', i), headers=auth)
-            if s == 200:
-                data_ok += 1
-            else:
-                c.check(f'第 {i + 1} 次调用', False, f'HTTP {s}：{raw[:120]!r}')
-        except OSError as e:
-            c.check(f'第 {i + 1} 次调用', False, str(e))
+    if sid:
+        for i in range(3):
+            try:
+                s, _, raw = req(args.base, 'POST', data_path,
+                                body=rpc_call('get_a_realtime', i), headers=data_h)
+                if s == 200:
+                    data_ok += 1
+                else:
+                    c.check(f'第 {i + 1} 次调用', False, f'HTTP {s}：{raw[:120]!r}')
+            except OSError as e:
+                c.check(f'第 {i + 1} 次调用', False, str(e))
     c.check('免费组 3/3 放行', data_ok == 3, f'实际放行 {data_ok}/3')
 
     print(f'■ 阶段 4：收费组配额拦截（{args.group_alpha}：普通×2 应放行，重度×2 应第 2 次 429）')
+    alpha_path = f'/hub/mcp/{args.group_alpha}'
+    sid, alpha_h = mcp_open(args.base, alpha_path, auth)
+    c.check('收费组会话建立', sid is not None, f'POST {alpha_path} initialize')
     alpha_plain_ok = 0
-    for i in range(2):
-        s, _, raw = req(args.base, 'POST', f'/{args.group_alpha}/messages',
-                        body=rpc_call('factor_screen', i), headers=auth)
-        if s == 200:
-            alpha_plain_ok += 1
-        else:
-            c.check(f'普通调用第 {i + 1} 次', False, f'HTTP {s}：{raw[:120]!r}')
+    if sid:
+        for i in range(2):
+            s, _, raw = req(args.base, 'POST', alpha_path,
+                            body=rpc_call('ml_metrics', i), headers=alpha_h)
+            if s == 200:
+                alpha_plain_ok += 1
+            else:
+                c.check(f'普通调用第 {i + 1} 次', False, f'HTTP {s}：{raw[:120]!r}')
     c.check('收费组普通调用 2/2 放行（未达临时 daily=10）', alpha_plain_ok == 2)
 
     heavy_results = []
-    for i in range(2):
-        s, _, raw = req(args.base, 'POST', f'/{args.group_alpha}/messages',
-                        body=rpc_call(heavy_tool, 100 + i), headers=auth)
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            payload = {}
-        heavy_results.append((s, payload))
-    c.check('重度调用第 1 次放行', heavy_results[0][0] == 200, f'HTTP {heavy_results[0][0]}')
-    blocked = heavy_results[1][0] == 429 and 'error' in heavy_results[1][1]
-    c.check('重度调用第 2 次拦截 429（转发前）', blocked,
-            (heavy_results[1][1].get('error', {}).get('message', '') if blocked
-             else f'HTTP {heavy_results[1][0]}'))
+    if sid:
+        for i in range(2):
+            s, _, raw = req(args.base, 'POST', alpha_path,
+                            body=rpc_call(heavy_tool, 100 + i), headers=alpha_h)
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                payload = {}
+            heavy_results.append((s, payload))
+        c.check('重度调用第 1 次放行', heavy_results[0][0] == 200, f'HTTP {heavy_results[0][0]}')
+        blocked = heavy_results[1][0] == 429 and 'error' in heavy_results[1][1]
+        c.check('重度调用第 2 次拦截 429（转发前）', blocked,
+                (heavy_results[1][1].get('error', {}).get('message', '') if blocked
+                 else f'HTTP {heavy_results[1][0]}'))
 
-    print('■ 阶段 5：SSE 流式连通性抽查')
+    print('■ 阶段 5：SSE 流式连通性抽查（tools/call 响应须为 text/event-stream，不被缓冲）')
     try:
-        s, hdrs, raw = req(args.base, 'GET', f'/{args.group_data}/sse', headers=auth,
-                           timeout=10, read_limit=64)
-        c.check('SSE 通道连通', s == 200, f'HTTP {s}, {hdrs.get("Content-Type", "?")}, 读到 {len(raw)}B')
+        s, hdrs, raw = req(args.base, 'POST', data_path,
+                           body=rpc_call('get_a_realtime', 999), headers=data_h,
+                           timeout=15, read_limit=512)
+        ctype = hdrs.get('Content-Type', hdrs.get('content-type', '?'))
+        c.check('SSE 通道连通', s == 200 and 'event-stream' in ctype,
+                f'HTTP {s}, {ctype}, 读到 {len(raw)}B')
     except OSError as e:
         c.check('SSE 通道连通', False, str(e))
 
