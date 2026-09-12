@@ -10,6 +10,7 @@
   },
   "admin_token": "change-me",
   "mcp_settings_path": "/mnt/mcp_settings.json",
+  "log_retention_days": 30,
   "groups": {
     "data": {
       "tier": "free"

@@ -24,11 +24,12 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # ---------------------------------------------------------------- 常量
 
@@ -54,6 +55,18 @@ CREATE TABLE IF NOT EXISTS blocks (
   reason     TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_blocks_ts ON blocks(ts);
+CREATE TABLE IF NOT EXISTS calls (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         INTEGER NOT NULL,
+  key_name   TEXT NOT NULL,
+  group_name TEXT NOT NULL,
+  tool       TEXT NOT NULL DEFAULT '',
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  status     TEXT NOT NULL,           -- ok / http_error / blocked
+  reason     TEXT NOT NULL DEFAULT '' -- blocked 时的原因（daily/disabled/...）
+);
+CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);
+CREATE INDEX IF NOT EXISTS idx_calls_key_ts ON calls(key_name, ts);
 """
 
 DEFAULT_CONFIG = {
@@ -62,6 +75,7 @@ DEFAULT_CONFIG = {
     'admin_plane': {'host': '0.0.0.0', 'port': 3300},
     'admin_token': 'change-me',                # 管理面访问令牌
     'mcp_settings_path': '/mnt/mcp_settings.json',  # 只读挂载 mcphub 的配置文件
+    'log_retention_days': 30,                  # 调用流水保留天数（启动时 + 每小时清理）
     'groups': {                                # 路由路径段 → 套餐档
         'data': {'tier': 'free'},
         'alpha': {'tier': 'paid'},
@@ -207,6 +221,7 @@ class QuotaStore:
         self.path = path
         self.lock = threading.Lock()
         conn = sqlite3.connect(path)
+        conn.execute('PRAGMA journal_mode=WAL')  # 热路径读写不互锁
         conn.executescript(SCHEMA)
         conn.commit()
         conn.close()
@@ -295,6 +310,131 @@ class QuotaStore:
             'recent_blocks': [dict(r) for r in recent_blocks],
         }
 
+    # -- 调用流水 ----------------------------------------------------
+
+    def log_call(self, key_name, group, tool, latency_ms, status, reason=''):
+        """单条 INSERT，调用方负责 try/except（记录失败不得影响转发）。"""
+        with self.lock:
+            c = self._conn()
+            c.execute(
+                'INSERT INTO calls(ts,key_name,group_name,tool,latency_ms,status,reason) '
+                'VALUES(?,?,?,?,?,?,?)',
+                (int(time.time()), key_name, group, tool or '', int(latency_ms), status, reason or ''),
+            )
+            c.commit()
+            c.close()
+
+    def prune_calls(self, retention_days):
+        """删除 N 天前的流水，返回删除行数。"""
+        cutoff = int(time.time()) - int(retention_days) * 86400
+        with self.lock:
+            c = self._conn()
+            cur = c.execute('DELETE FROM calls WHERE ts < ?', (cutoff,))
+            n = cur.rowcount
+            c.commit()
+            c.close()
+        return n
+
+    def daily_series(self, days=7, heavy_tools=()):
+        """近 N 天每日 total/heavy/blocked（按本地日期分桶，含今天）。"""
+        start = _day_start() - (days - 1) * 86400
+        with self.lock:
+            c = self._conn()
+            rows = c.execute(
+                'SELECT ts, tool, status FROM calls WHERE ts >= ?', (start,)).fetchall()
+            c.close()
+        heavy_set = set(heavy_tools or ())
+        buckets = {}
+        for i in range(days):
+            d = time.strftime('%Y-%m-%d', time.localtime(start + i * 86400))
+            buckets[d] = {'date': d, 'total': 0, 'heavy': 0, 'blocked': 0}
+        for r in rows:
+            d = time.strftime('%Y-%m-%d', time.localtime(r['ts']))
+            b = buckets.get(d)
+            if b is None:
+                continue
+            b['total'] += 1
+            if r['status'] == 'blocked':
+                b['blocked'] += 1
+            if r['tool'] in heavy_set:
+                b['heavy'] += 1
+        return list(buckets.values())
+
+    def call_stats(self, key_name=None):
+        """今日成功率与 p50/p95 延迟。成功率 = ok / 全部（blocked 也算未成功）；
+        延迟只统计真正打到上游的（排除 blocked 的 0ms）。"""
+        start = _day_start()
+        sql = 'SELECT latency_ms, status FROM calls WHERE ts >= ?'
+        args = [start]
+        if key_name is not None:
+            sql += ' AND key_name = ?'
+            args.append(key_name)
+        with self.lock:
+            c = self._conn()
+            rows = c.execute(sql, args).fetchall()
+            c.close()
+        total = len(rows)
+        ok = sum(1 for r in rows if r['status'] == 'ok')
+        lat = sorted(r['latency_ms'] for r in rows if r['status'] != 'blocked')
+        return {
+            'total': total,
+            'ok': ok,
+            'success_rate': round(ok / total, 4) if total else None,
+            'p50': _percentile(lat, 0.50),
+            'p95': _percentile(lat, 0.95),
+        }
+
+    def key_group_usage(self, key_name):
+        """该 key 各分组的今日/本月用量。"""
+        day = time.strftime('%Y-%m-%d')
+        month = day[:7]
+        with self.lock:
+            c = self._conn()
+            rows = c.execute(
+                'SELECT group_name, period, calls, heavy FROM usage '
+                'WHERE key_name=? AND period IN (?,?)', (key_name, day, month)).fetchall()
+            c.close()
+        out = {}
+        for r in rows:
+            e = out.setdefault(r['group_name'], {
+                'group_name': r['group_name'],
+                'day_calls': 0, 'day_heavy': 0, 'month_calls': 0, 'month_heavy': 0})
+            if r['period'] == day:
+                e['day_calls'], e['day_heavy'] = r['calls'], r['heavy']
+            else:
+                e['month_calls'], e['month_heavy'] = r['calls'], r['heavy']
+        return sorted(out.values(), key=lambda x: -x['month_calls'])
+
+    def recent_calls(self, key_name=None, limit=50):
+        sql = ('SELECT ts, key_name, group_name, tool, latency_ms, status, reason '
+               'FROM calls')
+        args = []
+        if key_name is not None:
+            sql += ' WHERE key_name = ?'
+            args.append(key_name)
+        sql += ' ORDER BY id DESC LIMIT ?'
+        args.append(int(limit))
+        with self.lock:
+            c = self._conn()
+            rows = c.execute(sql, args).fetchall()
+            c.close()
+        return [dict(r) for r in rows]
+
+
+def _day_start():
+    """本地今日 00:00 的 unix ts。"""
+    lt = time.localtime()
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+
+
+def _percentile(sorted_vals, q):
+    if not sorted_vals:
+        return None
+    k = (len(sorted_vals) - 1) * q
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return round(sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo), 1)
+
 
 # ---------------------------------------------------------------- 判定逻辑
 
@@ -314,18 +454,18 @@ def extract_group(raw_path, cfg):
 
 
 def classify_request(body_bytes, cfg):
-    """返回 (是否计次, 是否重度)。只统计 JSON-RPC tools/call。"""
+    """返回 (是否计次, 是否重度, 工具名)。只统计 JSON-RPC tools/call。"""
     if not body_bytes:
-        return False, False
+        return False, False, ''
     try:
         req = json.loads(body_bytes)
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return False, False
+        return False, False, ''
     if not isinstance(req, dict) or req.get('method') != 'tools/call':
-        return False, False
+        return False, False, ''
     name = (req.get('params') or {}).get('name', '')
     heavy = name in set(cfg.get('heavy_tools') or [])
-    return True, heavy
+    return True, heavy, name
 
 
 def resolve_limits(cfg, key_name, group):
@@ -357,6 +497,21 @@ REASON_TEXT = {
     'heavy_daily': '今日重度工具配额已用完，明日 00:00 重置',
     'monthly': '本月调用配额已用完，下月 1 日重置',
 }
+
+
+def key_status_block(cfg, key_name):
+    """key 级拦截（先于配额检查）：disabled / expires_at 过期。返回 (reason, 文案) 或 None。"""
+    ov = (cfg.get('key_overrides') or {}).get(key_name) or {}
+    if ov.get('disabled'):
+        return 'disabled', 'key 已禁用'
+    exp = ov.get('expires_at')
+    if exp is not None:
+        try:
+            if time.time() >= float(exp):
+                return 'expired', 'key 已过期'
+        except (TypeError, ValueError):
+            pass  # 配置里写了非法 expires_at 不拦截，避免误伤
+    return None
 
 
 # ---------------------------------------------------------------- 数据面
@@ -424,13 +579,30 @@ class DataPlaneHandler(BaseHTTPRequestHandler):
         key_name = info['name'] if info else 'anonymous'
         group = extract_group(self.path, cfg)
 
-        countable, heavy = classify_request(body, cfg)
+        # key 级拦截（先于配额检查，且对所有请求生效，不只 tools/call）
+        blocked = key_status_block(cfg, key_name)
+        if blocked:
+            reason, text = blocked
+            countable, _, tool = classify_request(body, cfg)
+            if countable:
+                self._log_call(key_name, group, tool, 0, 'blocked', reason)
+            return self._json(403, {
+                'jsonrpc': '2.0',
+                'error': {
+                    'code': -32003,
+                    'message': text,
+                    'data': {'key': key_name, 'group': group, 'quota': reason},
+                },
+            })
+
+        countable, heavy, tool = classify_request(body, cfg)
         if countable:
             limits = resolve_limits(cfg, key_name, group)
             usage = self.server.store.get_usage(key_name, group)
             reason = check_quota(limits, usage, heavy)
             if reason:
                 self.server.store.add_block(key_name, group, reason)
+                self._log_call(key_name, group, tool, 0, 'blocked', reason)
                 return self._json(429, {
                     'jsonrpc': '2.0',
                     'error': {
@@ -441,10 +613,24 @@ class DataPlaneHandler(BaseHTTPRequestHandler):
                     },
                 })
             self.server.store.bump(key_name, group, heavy)
+            t0 = time.monotonic()
+            upstream_status = self._forward(cfg, body)
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            # 响应已完整转发后再落流水，热路径上只多一条 WAL INSERT
+            status = 'ok' if upstream_status is not None and upstream_status < 400 else 'http_error'
+            self._log_call(key_name, group, tool, latency_ms, status)
+            return
 
         self._forward(cfg, body)
 
+    def _log_call(self, key_name, group, tool, latency_ms, status, reason=''):
+        try:
+            self.server.store.log_call(key_name, group, tool, latency_ms, status, reason)
+        except Exception as e:  # 流水记录失败只记日志，绝不影响转发
+            print(f'[quota-platform] log_call 失败: {e}', file=sys.stderr)
+
     def _forward(self, cfg, body):
+        """透传并返回上游状态码（连接失败返回 502）。"""
         up = urlparse(cfg['upstream'])
         conn = HTTPConnection(up.hostname, up.port or 80, timeout=300)
         try:
@@ -454,7 +640,8 @@ class DataPlaneHandler(BaseHTTPRequestHandler):
             resp = conn.getresponse()
         except OSError as e:
             conn.close()
-            return self._json(502, {'error': 'upstream_unreachable', 'detail': str(e)})
+            self._json(502, {'error': 'upstream_unreachable', 'detail': str(e)})
+            return 502
 
         try:
             self.send_response(resp.status)
@@ -476,6 +663,7 @@ class DataPlaneHandler(BaseHTTPRequestHandler):
         finally:
             conn.close()
             self.close_connection = True
+        return resp.status
 
     def log_message(self, fmt, *args):  # 静音默认日志，避免刷量
         pass
@@ -516,12 +704,39 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         if path == '/api/state':
             cfg = self.server.cfg.current()
             masked = {k: v for k, v in cfg.items() if k != 'admin_token'}
+            stats = self.server.store.call_stats()
             return self._json(200, {
                 'config': masked,
                 'inventory': self.server.inventory.all_masked(),
+                'series_7d': self.server.store.daily_series(7, cfg.get('heavy_tools')),
+                'today_success_rate': stats['success_rate'],
+                'today_latency': {'p50': stats['p50'], 'p95': stats['p95']},
                 **self.server.store.state(),
             })
+        m = re.fullmatch(r'/api/key/([^/]+)', path)
+        if m:
+            return self._key_detail(unquote(m.group(1)))
         self._json(404, {'error': 'not_found'})
+
+    def _key_detail(self, name):
+        cfg = self.server.cfg.current()
+        ov = (cfg.get('key_overrides') or {}).get(name) or {}
+        usage = self.server.store.key_group_usage(name)
+        stats = self.server.store.call_stats(name)
+        groups = sorted(set((cfg.get('groups') or {}).keys()) |
+                        {u['group_name'] for u in usage} | {'global'})
+        return self._json(200, {
+            'key': name,
+            'in_inventory': any(k['name'] == name for k in self.server.inventory.all_masked()),
+            'disabled': bool(ov.get('disabled')),
+            'expires_at': ov.get('expires_at'),
+            'limits': {g: resolve_limits(cfg, name, g) for g in groups},
+            'usage': usage,
+            'success_rate': stats['success_rate'],
+            'today_calls': stats['total'],
+            'latency': {'p50': stats['p50'], 'p95': stats['p95']},
+            'recent_calls': self.server.store.recent_calls(name, 50),
+        })
 
     def do_POST(self):
         if not self._authed():
@@ -552,7 +767,42 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
                 return self._json(400, {'error': str(e)})
             self.server.cfg.save_quota_rules(rules)
             return self._json(200, {'ok': True})
+        m = re.fullmatch(r'/api/key/([^/]+)/status', path)
+        if m:
+            return self._set_key_status(unquote(m.group(1)))
         self._json(404, {'error': 'not_found'})
+
+    def _set_key_status(self, name):
+        """写 key_overrides[name] 的 disabled / expires_at（保留 tier_by_group 等其他字段），热生效。"""
+        length = int(self.headers.get('Content-Length') or 0)
+        try:
+            req = json.loads(self.rfile.read(length) or b'{}')
+        except json.JSONDecodeError:
+            return self._json(400, {'error': 'invalid_json'})
+        if not isinstance(req, dict):
+            return self._json(400, {'error': 'body 必须是对象'})
+        cfg = self.server.cfg.current()
+        overrides = dict(cfg.get('key_overrides') or {})
+        entry = dict(overrides.get(name) or {})
+        if 'disabled' in req:
+            if not isinstance(req['disabled'], bool):
+                return self._json(400, {'error': 'disabled 必须是 bool'})
+            entry['disabled'] = req['disabled']
+        if 'expires_at' in req:
+            exp = req['expires_at']
+            if exp is not None and not (isinstance(exp, (int, float)) and not isinstance(exp, bool)):
+                return self._json(400, {'error': 'expires_at 必须是 unix 时间戳或 null'})
+            entry['expires_at'] = exp
+            if exp is not None:
+                entry['expires_at'] = int(exp)
+        overrides[name] = entry
+        try:
+            self.server.cfg.save_quota_rules({'key_overrides': overrides})
+        except (OSError, json.JSONDecodeError) as e:
+            return self._json(500, {'error': f'config 写入失败: {e}'})
+        return self._json(200, {'ok': True, 'key': name,
+                                'disabled': bool(entry.get('disabled')),
+                                'expires_at': entry.get('expires_at')})
 
     @staticmethod
     def _validate_rules(rules):
@@ -615,6 +865,23 @@ def main():
     store = QuotaStore(args.db)
     inventory = KeyInventory(cfg.current().get('mcp_settings_path', ''))
     inventory.reload()
+
+    def prune_loop():
+        while True:
+            try:
+                days = int(cfg.current().get('log_retention_days') or 30)
+                n = store.prune_calls(days)
+                if n:
+                    print(f'[quota-platform] 流水清理：删除 {n} 条 {days} 天前记录', file=sys.stderr)
+            except Exception as e:
+                print(f'[quota-platform] 流水清理失败: {e}', file=sys.stderr)
+            time.sleep(3600)
+
+    try:
+        store.prune_calls(cfg.current().get('log_retention_days') or 30)
+    except Exception as e:
+        print(f'[quota-platform] 启动流水清理失败: {e}', file=sys.stderr)
+    threading.Thread(target=prune_loop, daemon=True).start()
 
     dcfg = cfg.current()['data_plane']
     acfg = cfg.current()['admin_plane']

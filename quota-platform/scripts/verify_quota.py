@@ -14,7 +14,8 @@ quota-platform 上线验证脚本（纯标准库）。
     4. alpha 组打 2 次普通 + 2 次重度调用 —— 期望普通放行、第 2 次重度返回 429
        （验证 key 识别、分组识别、日配额、重度配额、转发前拦截）
     5. SSE 流式连通性抽查
-    6. 恢复管理面前的原 key_overrides，不留副作用
+    6. 禁用 key → 调用应 403「key 已禁用」→ 恢复启用 → 调用放行
+    7. 恢复管理面前的原 key_overrides，不留副作用
 
 注意：验证会消耗测试 key 的少量配额（alpha 组 2 次普通 + 1 次重度）。
 """
@@ -25,7 +26,7 @@ import json
 import os
 import sys
 import time
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 class Checker:
@@ -234,7 +235,27 @@ def main():
     except OSError as e:
         c.check('SSE 通道连通', False, str(e))
 
-    print('■ 阶段 6：恢复原始配额规则')
+    print('■ 阶段 6：key 禁用/启用（禁用后调用应 403，恢复后放行，不留副作用）')
+    status_url = f'/api/key/{quote(key_name, safe="")}/status'
+    s, _, _ = req(args.admin_url, 'POST', status_url,
+                  body=json.dumps({'disabled': True}).encode(), headers=admin)
+    if c.check('禁用 key 写入', s == 200, f'HTTP {s}'):
+        s, _, raw = req(args.base, 'POST', data_path,
+                        body=rpc_call('get_a_realtime', 900), headers=data_h)
+        try:
+            emsg = json.loads(raw).get('error', {}).get('message', '')
+        except json.JSONDecodeError:
+            emsg = ''
+        c.check('禁用后调用返回 403「key 已禁用」', s == 403 and '禁用' in emsg,
+                f'HTTP {s} {emsg}')
+    s, _, _ = req(args.admin_url, 'POST', status_url,
+                  body=json.dumps({'disabled': False}).encode(), headers=admin)
+    if c.check('恢复启用写入', s == 200, f'HTTP {s}'):
+        s, _, raw = req(args.base, 'POST', data_path,
+                        body=rpc_call('get_a_realtime', 901), headers=data_h)
+        c.check('恢复启用后调用放行', s == 200, f'HTTP {s}')
+
+    print('■ 阶段 7：恢复原始配额规则')
     s, _, _ = req(args.admin_url, 'POST', '/api/config', body=saved_overrides.encode(), headers=admin)
     c.check('恢复 key_overrides', s == 200, f'HTTP {s}')
 

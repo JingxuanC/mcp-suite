@@ -27,7 +27,7 @@ python server.py --config config.json
 # 数据面 :3200  管理面 :3300
 ```
 
-跑测试：`python -m unittest discover -s tests -v`（15 个用例）
+跑测试：`python -m unittest discover -s tests -v`（27 个用例）
 
 ## 管控模型
 
@@ -46,10 +46,18 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
 ## 管理面（:3300）
 
 生产环境经 nginx `https://causal-memory.com/quota/` 访问（前缀由 nginx 剥离）。输入管理令牌后：
-- 总览卡片：今日/本月调用、重度调用、24h 拦截、活跃 key
+- 总览卡片：今日/本月调用、重度调用、24h 拦截、活跃 key、今日成功率、今日 p50/p95 延迟
+- 近 7 天调用量折线图（总调用 / 拦截，Canvas 手绘）
 - 今日分组用量、key 用量 TOP、最近拦截列表
+- key 列表逐行禁用/启用开关；点 key 名进下钻：分组用量（今日/本月）、生效配额档、成功率与延迟、近 50 条调用流水、过期时间设置
 - 规则在线编辑（tiers / groups / key_overrides / heavy_tools），保存即生效
 - key 库存列表（脱敏）
+
+### 调用流水与 key 状态
+
+- 数据面每次 `tools/call` 转发完成后落一条流水到 `calls` 表（key/分组/工具名/上游耗时/status: ok·http_error·blocked/原因）；WAL 模式单条 INSERT，记录失败只记日志不影响转发。保留期 `log_retention_days`（默认 30 天），启动时 + 每小时清理
+- key 级状态写在 `key_overrides[name]` 里：`disabled: true` → 数据面 403「key 已禁用」；`expires_at: <unix_ts>` 到期 → 403「key 已过期」。两条检查先于配额检查，管理面 `POST /api/key/<name>/status` 热生效
+- 管理 API：`GET /api/key/<name>` 返回该 key 分组用量/近 50 条流水/成功率/p50·p95/生效配额档/状态
 
 ## 在 mcp-suite 中的部署
 

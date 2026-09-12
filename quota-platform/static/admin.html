@@ -12,18 +12,19 @@
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
-  header { display: flex; align-items: baseline; gap: 16px; padding: 20px 28px 12px; border-bottom: 1px solid var(--line); }
+  header { display: flex; align-items: baseline; gap: 16px; padding: 20px 28px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
   header h1 { font-size: 18px; font-weight: 600; letter-spacing: .5px; }
   header h1 em { color: var(--accent); font-style: normal; }
   header .sub { color: var(--dim); font-size: 12px; }
   header input { margin-left: auto; background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 6px 10px; width: 220px; font-family: var(--mono); font-size: 12px; }
   main { padding: 20px 28px 60px; max-width: 1180px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
   .card .num { font: 600 26px/1.2 var(--mono); }
   .card .lbl { color: var(--dim); font-size: 12px; margin-top: 4px; }
   .card.warn .num { color: var(--accent); }
   .card.bad .num { color: var(--bad); }
+  .card.ok .num { color: var(--ok); }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 20px; overflow: hidden; }
   section h2 { font-size: 13px; font-weight: 600; color: var(--dim); padding: 12px 16px; border-bottom: 1px solid var(--line); letter-spacing: 1px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -35,10 +36,11 @@
   .pill.free { color: var(--ok); border-color: var(--ok); }
   .pill.paid { color: var(--accent); border-color: var(--accent); }
   .pill.blocked { color: var(--bad); border-color: var(--bad); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
   textarea { width: 100%; min-height: 190px; background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font: 12px/1.5 var(--mono); resize: vertical; }
-  .btnrow { display: flex; gap: 10px; align-items: center; padding: 12px 16px; }
+  .btnrow { display: flex; gap: 10px; align-items: center; padding: 12px 16px; flex-wrap: wrap; }
   button { background: var(--accent); color: #14100a; border: none; border-radius: 6px; padding: 7px 18px; font-weight: 600; cursor: pointer; font-size: 13px; }
   button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
   button:hover { filter: brightness(1.1); }
@@ -46,6 +48,28 @@
   #msg.err { color: var(--bad); }
   .muted { color: var(--dim); font-size: 12px; }
   footer { padding: 0 28px 30px; color: var(--dim); font-size: 11px; }
+  a.klink { color: var(--text); cursor: pointer; text-decoration: none; border-bottom: 1px dashed var(--dim); }
+  a.klink:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  /* 图表 */
+  .chart-wrap { padding: 12px 16px 8px; }
+  canvas#chart { width: 100%; height: 220px; display: block; }
+  .legend { display: flex; gap: 16px; padding: 0 16px 12px; font-size: 12px; color: var(--dim); }
+  .legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  /* 开关 */
+  .sw { position: relative; display: inline-block; width: 38px; height: 20px; vertical-align: middle; }
+  .sw input { opacity: 0; width: 0; height: 0; }
+  .sw .tr { position: absolute; inset: 0; background: #2a2f3a; border: 1px solid var(--line); border-radius: 99px; transition: .15s; }
+  .sw .tr::before { content: ""; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; background: var(--dim); border-radius: 50%; transition: .15s; }
+  .sw input:checked + .tr { background: rgba(76,175,125,.25); border-color: var(--ok); }
+  .sw input:checked + .tr::before { transform: translateX(18px); background: var(--ok); }
+  /* key 下钻 */
+  .keyhead { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+  .keyhead h2 { font-size: 17px; font-weight: 600; font-family: var(--mono); }
+  .keyhead .grow { flex: 1; }
+  input.dt { background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: 12px var(--mono); color-scheme: dark; }
+  .tbl-wrap { overflow-x: auto; }
+  #kmsg { color: var(--ok); font-size: 12px; }
+  #kmsg.err { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -55,66 +79,136 @@
   <input id="token" type="password" placeholder="管理令牌 (X-Admin-Token)" />
 </header>
 <main>
-  <div class="cards">
-    <div class="card"><div class="num" id="today_calls">–</div><div class="lbl">今日调用</div></div>
-    <div class="card"><div class="num" id="today_heavy">–</div><div class="lbl">今日重度调用</div></div>
-    <div class="card"><div class="num" id="month_calls">–</div><div class="lbl">本月调用</div></div>
-    <div class="card warn"><div class="num" id="blocks">–</div><div class="lbl">24h 拦截次数</div></div>
-    <div class="card"><div class="num" id="keys_active">–</div><div class="lbl">今日活跃 key</div></div>
-    <div class="card"><div class="num" id="keys_total">–</div><div class="lbl">库存 key 总数</div></div>
+  <!-- ============ 总览视图 ============ -->
+  <div id="view-main">
+    <div class="cards">
+      <div class="card"><div class="num" id="today_calls">–</div><div class="lbl">今日调用</div></div>
+      <div class="card"><div class="num" id="today_heavy">–</div><div class="lbl">今日重度调用</div></div>
+      <div class="card"><div class="num" id="month_calls">–</div><div class="lbl">本月调用</div></div>
+      <div class="card warn"><div class="num" id="blocks">–</div><div class="lbl">24h 拦截次数</div></div>
+      <div class="card ok"><div class="num" id="success_rate">–</div><div class="lbl">今日成功率</div></div>
+      <div class="card"><div class="num" id="p50">–</div><div class="lbl">今日延迟 p50</div></div>
+      <div class="card"><div class="num" id="p95">–</div><div class="lbl">今日延迟 p95</div></div>
+      <div class="card"><div class="num" id="keys_active">–</div><div class="lbl">今日活跃 key</div></div>
+      <div class="card"><div class="num" id="keys_total">–</div><div class="lbl">库存 key 总数</div></div>
+    </div>
+
+    <section>
+      <h2>近 7 天调用量</h2>
+      <div class="chart-wrap"><canvas id="chart"></canvas></div>
+      <div class="legend">
+        <span><i style="background:var(--accent)"></i>总调用</span>
+        <span><i style="background:var(--bad)"></i>拦截</span>
+      </div>
+    </section>
+
+    <div class="grid2">
+      <section>
+        <h2>今日分组用量</h2>
+        <table><thead><tr><th>分组</th><th class="num">调用</th><th class="num">重度</th><th>套餐档</th></tr></thead>
+        <tbody id="group_usage"></tbody></table>
+      </section>
+      <section>
+        <h2>今日 key 用量 TOP</h2>
+        <table><thead><tr><th>key</th><th>分组</th><th class="num">调用</th><th class="num">重度</th></tr></thead>
+        <tbody id="key_usage"></tbody></table>
+      </section>
+    </div>
+
+    <section>
+      <h2>最近拦截</h2>
+      <table><thead><tr><th>时间</th><th>key</th><th>分组</th><th>原因</th></tr></thead>
+      <tbody id="recent_blocks"></tbody></table>
+    </section>
+
+    <div class="grid2">
+      <section>
+        <h2>配额规则 · tiers（档位定义）</h2>
+        <textarea id="tiers" spellcheck="false"></textarea>
+      </section>
+      <section>
+        <h2>配额规则 · groups（分组→档位）</h2>
+        <textarea id="groups" spellcheck="false"></textarea>
+      </section>
+    </div>
+    <div class="grid2">
+      <section>
+        <h2>配额规则 · key 覆盖</h2>
+        <textarea id="key_overrides" spellcheck="false"></textarea>
+      </section>
+      <section>
+        <h2>重度工具名单</h2>
+        <textarea id="heavy_tools" spellcheck="false" style="min-height:90px"></textarea>
+        <div class="btnrow">
+          <button onclick="saveRules()">保存规则</button>
+          <button class="ghost" onclick="reloadInventory()">重载 key 库存</button>
+          <span id="msg"></span>
+        </div>
+      </section>
+    </div>
+
+    <section>
+      <h2>key 库存（点击名称进入下钻；开关控制禁用/启用）</h2>
+      <div class="tbl-wrap">
+      <table><thead><tr><th>名称</th><th>属主</th><th>类型</th><th>accessType</th><th>允许分组</th><th>启用</th><th>过期时间</th></tr></thead>
+      <tbody id="inventory"></tbody></table>
+      </div>
+      <p class="muted" style="padding:10px 16px">陌生 key 与 OAuth 短期 token 自动落入 anonymous + default 档；完整 token 仅存于 mcphub 侧，本平台只读。禁用/过期状态存于 config.json 的 key_overrides。</p>
+    </section>
   </div>
 
-  <div class="grid2">
-    <section>
-      <h2>今日分组用量</h2>
-      <table><thead><tr><th>分组</th><th class="num">调用</th><th class="num">重度</th><th>套餐档</th></tr></thead>
-      <tbody id="group_usage"></tbody></table>
-    </section>
-    <section>
-      <h2>今日 key 用量 TOP</h2>
-      <table><thead><tr><th>key</th><th>分组</th><th class="num">调用</th><th class="num">重度</th></tr></thead>
-      <tbody id="key_usage"></tbody></table>
-    </section>
-  </div>
+  <!-- ============ key 下钻视图 ============ -->
+  <div id="view-key" style="display:none">
+    <div class="keyhead">
+      <button class="ghost" onclick="backToMain()">← 返回</button>
+      <h2 id="kname">–</h2>
+      <span id="kbadges"></span>
+      <span class="grow"></span>
+      <label class="muted">启用 <label class="sw"><input type="checkbox" id="kenabled" onchange="toggleKey(this.checked)"><span class="tr"></span></label></label>
+    </div>
 
-  <section>
-    <h2>最近拦截</h2>
-    <table><thead><tr><th>时间</th><th>key</th><th>分组</th><th>原因</th></tr></thead>
-    <tbody id="recent_blocks"></tbody></table>
-  </section>
+    <div class="cards">
+      <div class="card ok"><div class="num" id="k_success">–</div><div class="lbl">今日成功率</div></div>
+      <div class="card"><div class="num" id="k_p50">–</div><div class="lbl">今日延迟 p50</div></div>
+      <div class="card"><div class="num" id="k_p95">–</div><div class="lbl">今日延迟 p95</div></div>
+      <div class="card"><div class="num" id="k_today">–</div><div class="lbl">今日流水条数</div></div>
+    </div>
 
-  <div class="grid2">
     <section>
-      <h2>配额规则 · tiers（档位定义）</h2>
-      <textarea id="tiers" spellcheck="false"></textarea>
-    </section>
-    <section>
-      <h2>配额规则 · groups（分组→档位）</h2>
-      <textarea id="groups" spellcheck="false"></textarea>
-    </section>
-  </div>
-  <div class="grid2">
-    <section>
-      <h2>配额规则 · key 覆盖</h2>
-      <textarea id="key_overrides" spellcheck="false"></textarea>
-    </section>
-    <section>
-      <h2>重度工具名单</h2>
-      <textarea id="heavy_tools" spellcheck="false" style="min-height:90px"></textarea>
+      <h2>过期时间（到期后数据面返回 403「key 已过期」）</h2>
       <div class="btnrow">
-        <button onclick="saveRules()">保存规则</button>
-        <button class="ghost" onclick="reloadInventory()">重载 key 库存</button>
-        <span id="msg"></span>
+        <input type="datetime-local" class="dt" id="kexpires" step="60">
+        <button onclick="saveExpiry()">保存过期时间</button>
+        <button class="ghost" onclick="clearExpiry()">清除（永不过期）</button>
+        <span id="kmsg"></span>
+      </div>
+    </section>
+
+    <div class="grid2">
+      <section>
+        <h2>分组用量（今日 / 本月）</h2>
+        <div class="tbl-wrap">
+        <table><thead><tr><th>分组</th><th class="num">今日调用</th><th class="num">今日重度</th><th class="num">本月调用</th><th class="num">本月重度</th></tr></thead>
+        <tbody id="k_usage"></tbody></table>
+        </div>
+      </section>
+      <section>
+        <h2>当前生效配额档（按分组）</h2>
+        <div class="tbl-wrap">
+        <table><thead><tr><th>分组</th><th class="num">daily</th><th class="num">monthly</th><th class="num">heavy_daily</th></tr></thead>
+        <tbody id="k_limits"></tbody></table>
+        </div>
+      </section>
+    </div>
+
+    <section>
+      <h2>近 50 条调用流水（倒序）</h2>
+      <div class="tbl-wrap">
+      <table><thead><tr><th>时间</th><th>分组</th><th>工具</th><th class="num">耗时 ms</th><th>状态</th><th>原因</th></tr></thead>
+      <tbody id="k_calls"></tbody></table>
       </div>
     </section>
   </div>
-
-  <section>
-    <h2>key 库存（来自 mcphub mcp_settings.json）</h2>
-    <table><thead><tr><th>名称</th><th>属主</th><th>类型</th><th>accessType</th><th>允许分组</th></tr></thead>
-    <tbody id="inventory"></tbody></table>
-    <p class="muted" style="padding:10px 16px">陌生 key 与 OAuth 短期 token 自动落入 anonymous + default 档；完整 token 仅存于 mcphub 侧，本平台只读。</p>
-  </section>
 </main>
 <footer>quota-platform · 数据面 :3200 → mcphub :3100 · 管理面 :3300 · 仅标准库实现</footer>
 
@@ -124,41 +218,59 @@ const tokenInput = $('token');
 tokenInput.value = localStorage.getItem('qp_admin_token') || '';
 tokenInput.addEventListener('change', () => { localStorage.setItem('qp_admin_token', tokenInput.value); load(); });
 
+let currentKey = null;   // 非空 = 下钻视图
+let lastState = null;
+
 async function api(path, opts = {}) {
   // 相对路径：经 nginx /quota/ 反代时不能发 /api/* 绝对路径（会落到 location / 的官网）
   const r = await fetch(path.replace(/^\//, ''), { ...opts, headers: { 'X-Admin-Token': tokenInput.value, ...(opts.headers || {}) } });
   if (r.status === 401) { const e = new Error('管理令牌错误'); e.code = 401; throw e; }
-  if (!r.ok) throw new Error('HTTP ' + r.status);
+  if (!r.ok) { const t = await r.text().catch(() => ''); const e = new Error('HTTP ' + r.status + (t ? ' ' + t.slice(0, 120) : '')); e.code = r.status; throw e; }
   return r.json();
 }
 
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+// 内联事件参数：JSON.stringify 生成合法 JS 字符串，再经 esc 转义后可安全放入双引号属性
+function js(s) { return esc(JSON.stringify(String(s))); }
 function fmt(n) { return (n ?? 0).toLocaleString('en-US'); }
-function fmtTs(ts) { return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }); }
+function fmtTs(ts) { return ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : '—'; }
+function fmtPct(r) { return r == null ? '–' : (r * 100).toFixed(1) + '%'; }
+function fmtMs(v) { return v == null ? '–' : fmt(Math.round(v)); }
+
+/* ---------------- 总览 ---------------- */
 
 async function load() {
+  if (currentKey) return loadKey(currentKey);
   let d;
   try { d = await api('/api/state'); } catch (e) { msg(e.code === 401 ? '管理令牌错误' : '加载失败：' + e.message, true); return; }
+  lastState = d;
   $('today_calls').textContent = fmt(d.today_calls);
   $('today_heavy').textContent = fmt(d.today_heavy);
   $('month_calls').textContent = fmt(d.month_calls);
   $('blocks').textContent = fmt(d.blocks_24h);
+  $('success_rate').textContent = fmtPct(d.today_success_rate);
+  $('p50').textContent = fmtMs(d.today_latency && d.today_latency.p50);
+  $('p95').textContent = fmtMs(d.today_latency && d.today_latency.p95);
   $('keys_active').textContent = fmt(d.today_keys);
   $('keys_total').textContent = fmt(d.inventory.length);
 
+  drawChart($('chart'), d.series_7d || []);
+
   const tierOf = g => (d.config.groups[g] || {}).tier || 'default';
   $('group_usage').innerHTML = d.group_usage.map(r =>
-    `<tr><td>${r.group_name}</td><td class="num">${fmt(r.calls)}</td><td class="num">${fmt(r.heavy)}</td>` +
-    `<td><span class="pill ${tierOf(r.group_name)}">${tierOf(r.group_name)}</span></td></tr>`).join('') ||
+    `<tr><td>${esc(r.group_name)}</td><td class="num">${fmt(r.calls)}</td><td class="num">${fmt(r.heavy)}</td>` +
+    `<td><span class="pill ${esc(tierOf(r.group_name))}">${esc(tierOf(r.group_name))}</span></td></tr>`).join('') ||
     '<tr><td colspan="4" class="muted">今日暂无调用</td></tr>';
 
   $('key_usage').innerHTML = d.key_usage.map(r =>
-    `<tr><td>${r.key_name}</td><td>${r.group_name}</td><td class="num">${fmt(r.calls)}</td><td class="num">${fmt(r.heavy)}</td></tr>`).join('') ||
+    `<tr><td><a class="klink" onclick="openKey(${js(r.key_name)})">${esc(r.key_name)}</a></td>` +
+    `<td>${esc(r.group_name)}</td><td class="num">${fmt(r.calls)}</td><td class="num">${fmt(r.heavy)}</td></tr>`).join('') ||
     '<tr><td colspan="4" class="muted">今日暂无调用</td></tr>';
 
-  const reasons = { daily: '日配额', heavy_daily: '重度日配额', monthly: '月配额' };
+  const reasons = { daily: '日配额', heavy_daily: '重度日配额', monthly: '月配额', disabled: '已禁用', expired: '已过期' };
   $('recent_blocks').innerHTML = d.recent_blocks.map(b =>
-    `<tr><td class="muted">${fmtTs(b.ts)}</td><td>${b.key_name}</td><td>${b.group_name}</td>` +
-    `<td><span class="pill blocked">${reasons[b.reason] || b.reason}</span></td></tr>`).join('') ||
+    `<tr><td class="muted">${fmtTs(b.ts)}</td><td><a class="klink" onclick="openKey(${js(b.key_name)})">${esc(b.key_name)}</a></td><td>${esc(b.group_name)}</td>` +
+    `<td><span class="pill blocked">${reasons[b.reason] || esc(b.reason)}</span></td></tr>`).join('') ||
     '<tr><td colspan="4" class="muted">暂无拦截</td></tr>';
 
   $('tiers').value = JSON.stringify(d.config.tiers, null, 2);
@@ -166,15 +278,158 @@ async function load() {
   $('key_overrides').value = JSON.stringify(d.config.key_overrides, null, 2);
   $('heavy_tools').value = JSON.stringify(d.config.heavy_tools, null, 2);
 
-  $('inventory').innerHTML = d.inventory.map(k =>
-    `<tr><td>${k.name}</td><td>${k.owner || '—'}</td><td>${k.kind}</td><td>${k.accessType}</td>` +
-    `<td>${(k.allowedGroups || []).join(', ') || '全部'}</td></tr>`).join('') ||
-    '<tr><td colspan="5" class="muted">库存为空（检查 mcp_settings.json 挂载）</td></tr>';
+  const ov = d.config.key_overrides || {};
+  $('inventory').innerHTML = d.inventory.map(k => {
+    const o = ov[k.name] || {};
+    return `<tr><td><a class="klink" onclick="openKey(${js(k.name)})">${esc(k.name)}</a></td>` +
+      `<td>${esc(k.owner) || '—'}</td><td>${esc(k.kind)}</td><td>${esc(k.accessType)}</td>` +
+      `<td>${(k.allowedGroups || []).map(esc).join(', ') || '全部'}</td>` +
+      `<td><label class="sw"><input type="checkbox" ${o.disabled ? '' : 'checked'} onchange="setDisabled(${js(k.name)}, !this.checked)"><span class="tr"></span></label></td>` +
+      `<td class="muted">${o.expires_at ? fmtTs(o.expires_at) : '—'}</td></tr>`;
+  }).join('') || '<tr><td colspan="7" class="muted">库存为空（检查 mcp_settings.json 挂载）</td></tr>';
   msg('');
 }
 
+/* ---------------- 7 天折线图（Canvas 手绘） ---------------- */
+
+function drawChart(canvas, series) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth || canvas.parentElement.clientWidth || 600;
+  const H = 220;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+  const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const pad = { l: 46, r: 12, t: 14, b: 26 };
+  const iw = W - pad.l - pad.r, ih = H - pad.t - pad.b;
+  if (!series.length) return;
+  const maxV = Math.max(1, ...series.map(s => Math.max(s.total, s.blocked)));
+  const step = series.length > 1 ? iw / (series.length - 1) : 0;
+  const X = i => pad.l + i * step;
+  const Y = v => pad.t + ih - (v / maxV) * ih;
+
+  // 网格 + y 轴刻度
+  ctx.font = '10px Menlo, monospace';
+  ctx.strokeStyle = css('--line'); ctx.fillStyle = css('--dim'); ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {
+    const v = maxV * g / 4, y = Y(v);
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.textAlign = 'right'; ctx.fillText(v >= 10000 ? (v / 1000).toFixed(0) + 'k' : String(Math.round(v)), pad.l - 6, y + 3);
+  }
+  // x 轴日期
+  ctx.textAlign = 'center';
+  series.forEach((s, i) => ctx.fillText(s.date.slice(5), X(i), H - 8));
+
+  const line = (vals, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    vals.forEach((v, i) => i ? ctx.lineTo(X(i), Y(v)) : ctx.moveTo(X(i), Y(v)));
+    ctx.stroke();
+    ctx.fillStyle = color;
+    vals.forEach((v, i) => { ctx.beginPath(); ctx.arc(X(i), Y(v), 2.5, 0, 7); ctx.fill(); });
+  };
+  line(series.map(s => s.total), css('--accent'));
+  line(series.map(s => s.blocked), css('--bad'));
+}
+
+/* ---------------- key 下钻 ---------------- */
+
+function openKey(name) {
+  currentKey = name;
+  $('view-main').style.display = 'none';
+  $('view-key').style.display = '';
+  loadKey(currentKey);
+}
+
+function backToMain() {
+  currentKey = null;
+  $('view-key').style.display = 'none';
+  $('view-main').style.display = '';
+  load();
+}
+
+async function loadKey(name) {
+  let d;
+  try { d = await api('/api/key/' + encodeURIComponent(name)); }
+  catch (e) { kmsg('加载失败：' + e.message, true); return; }
+  $('kname').textContent = d.key;
+  const badges = [];
+  if (d.disabled) badges.push('<span class="pill blocked">已禁用</span>');
+  if (d.expires_at && d.expires_at * 1000 < Date.now()) badges.push('<span class="pill blocked">已过期</span>');
+  else if (d.expires_at) badges.push(`<span class="pill paid">至 ${fmtTs(d.expires_at)}</span>`);
+  if (!d.in_inventory) badges.push('<span class="pill">不在库存</span>');
+  $('kbadges').innerHTML = badges.join(' ');
+  $('kenabled').checked = !d.disabled;
+  $('kexpires').value = d.expires_at ? toLocalInput(d.expires_at) : '';
+
+  $('k_success').textContent = fmtPct(d.success_rate);
+  $('k_p50').textContent = fmtMs(d.latency && d.latency.p50);
+  $('k_p95').textContent = fmtMs(d.latency && d.latency.p95);
+  $('k_today').textContent = fmt(d.today_calls);
+
+  $('k_usage').innerHTML = d.usage.map(u =>
+    `<tr><td>${esc(u.group_name)}</td><td class="num">${fmt(u.day_calls)}</td><td class="num">${fmt(u.day_heavy)}</td>` +
+    `<td class="num">${fmt(u.month_calls)}</td><td class="num">${fmt(u.month_heavy)}</td></tr>`).join('') ||
+    '<tr><td colspan="5" class="muted">暂无用量</td></tr>';
+
+  const limOf = l => l == null ? '∞' : fmt(l);
+  $('k_limits').innerHTML = Object.entries(d.limits).map(([g, l]) =>
+    `<tr><td>${esc(g)}</td><td class="num">${limOf(l.daily)}</td><td class="num">${limOf(l.monthly)}</td><td class="num">${limOf(l.heavy_daily)}</td></tr>`).join('') ||
+    '<tr><td colspan="4" class="muted">无</td></tr>';
+
+  const stPill = { ok: '<span class="pill ok">ok</span>', http_error: '<span class="pill blocked">http_error</span>', blocked: '<span class="pill blocked">blocked</span>' };
+  $('k_calls').innerHTML = d.recent_calls.map(r =>
+    `<tr><td class="muted">${fmtTs(r.ts)}</td><td>${esc(r.group_name)}</td><td style="font-family:var(--mono)">${esc(r.tool)}</td>` +
+    `<td class="num">${fmt(r.latency_ms)}</td><td>${stPill[r.status] || esc(r.status)}</td><td class="muted">${esc(r.reason) || '—'}</td></tr>`).join('') ||
+    '<tr><td colspan="6" class="muted">暂无流水（旧数据在升级前未记录）</td></tr>';
+  kmsg('');
+}
+
+function toLocalInput(ts) {
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function setDisabled(name, disabled) {
+  try {
+    await api('/api/key/' + encodeURIComponent(name) + '/status', { method: 'POST', body: JSON.stringify({ disabled }) });
+    msg(disabled ? '已禁用' : '已启用'); load();
+  } catch (e) { msg('操作失败：' + e.message, true); load(); }
+}
+
+function toggleKey(enabled) { if (currentKey) setDisabledKey(currentKey, !enabled); }
+async function setDisabledKey(name, disabled) {
+  try {
+    await api('/api/key/' + encodeURIComponent(name) + '/status', { method: 'POST', body: JSON.stringify({ disabled }) });
+    kmsg(disabled ? '已禁用' : '已启用'); loadKey(name);
+  } catch (e) { kmsg('操作失败：' + e.message, true); loadKey(name); }
+}
+
+async function saveExpiry() {
+  const v = $('kexpires').value;
+  if (!v) return kmsg('请先选择时间', true);
+  const ts = Math.floor(new Date(v).getTime() / 1000);
+  try {
+    await api('/api/key/' + encodeURIComponent(currentKey) + '/status', { method: 'POST', body: JSON.stringify({ expires_at: ts }) });
+    kmsg('过期时间已保存'); loadKey(currentKey);
+  } catch (e) { kmsg('保存失败：' + e.message, true); }
+}
+
+async function clearExpiry() {
+  try {
+    await api('/api/key/' + encodeURIComponent(currentKey) + '/status', { method: 'POST', body: JSON.stringify({ expires_at: null }) });
+    kmsg('已清除过期时间'); loadKey(currentKey);
+  } catch (e) { kmsg('操作失败：' + e.message, true); }
+}
+
+/* ---------------- 规则保存 ---------------- */
+
 function msg(text, isErr) {
   const m = $('msg'); m.textContent = text; m.className = isErr ? 'err' : '';
+}
+function kmsg(text, isErr) {
+  const m = $('kmsg'); m.textContent = text; m.className = isErr ? 'err' : '';
 }
 
 async function saveRules() {
@@ -195,6 +450,8 @@ async function reloadInventory() {
   try { const r = await api('/api/reload_inventory', { method: 'POST' }); msg(`库存已重载（${r.keys} 个 key）`); load(); }
   catch (e) { msg('重载失败：' + e.message, true); }
 }
+
+window.addEventListener('resize', () => { if (!currentKey && lastState) drawChart($('chart'), lastState.series_7d || []); });
 
 load();
 setInterval(load, 15000);

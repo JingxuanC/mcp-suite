@@ -43,6 +43,14 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
                     break
             self.close_connection = True
             return
+        if self.path.split('?')[0].startswith('/fail'):
+            payload = b'{"err":true}'
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         n = int(self.headers.get('Content-Length') or 0)
         body = self.rfile.read(n) if n else b''
         payload = json.dumps({'ok': True, 'received': len(body)}).encode()
@@ -295,6 +303,192 @@ class QuotaPlatformTest(unittest.TestCase):
         self.assertIn('alice', names)
         self.assertIn('bob', names)
         self.assertNotIn('ghost', names)  # disabled 不入库
+
+    # -- 调用流水 ----------------------------------------------------
+
+    def test_call_log_written(self):
+        s, _ = self.call(self.data_port, 'POST', '/data/messages',
+                         rpc_call('get_price'), token='tok-alice')
+        self.assertEqual(s, 200)
+        rows = self.store.recent_calls('alice')
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r['tool'], 'get_price')
+        self.assertEqual(r['group_name'], 'data')
+        self.assertEqual(r['status'], 'ok')
+        self.assertEqual(r['reason'], '')
+        self.assertGreaterEqual(r['latency_ms'], 0)
+
+    def test_blocked_call_logged(self):
+        for _ in range(2):  # paid daily=2
+            s, _ = self.call(self.data_port, 'POST', '/alpha/messages',
+                             rpc_call('t'), token='tok-alice')
+            self.assertEqual(s, 200)
+        s, _ = self.call(self.data_port, 'POST', '/alpha/messages',
+                         rpc_call('t'), token='tok-alice')
+        self.assertEqual(s, 429)
+        rows = self.store.recent_calls('alice')
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0]['status'], 'blocked')  # 倒序，最新在前
+        self.assertEqual(rows[0]['reason'], 'daily')
+        self.assertEqual(rows[1]['status'], 'ok')
+
+    def test_http_error_logged(self):
+        s, _ = self.call(self.data_port, 'POST', '/fail/messages',
+                         rpc_call('x'), token='tok-bob')
+        self.assertEqual(s, 500)
+        rows = self.store.recent_calls('bob')
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['status'], 'http_error')
+
+    def test_non_counted_call_not_logged(self):
+        s, _ = self.call(self.data_port, 'POST', '/messages', rpc_list(), token='tok-alice')
+        self.assertEqual(s, 200)
+        self.assertEqual(self.store.recent_calls('alice'), [])
+
+    def test_prune_calls(self):
+        self.store.log_call('alice', 'data', 'old_tool', 1, 'ok')
+        import sqlite3
+        con = sqlite3.connect(self.db)
+        con.execute('UPDATE calls SET ts = ? WHERE tool = ?',
+                    (int(time.time()) - 31 * 86400, 'old_tool'))
+        con.execute('INSERT INTO calls(ts,key_name,group_name,tool,latency_ms,status,reason) '
+                    'VALUES(?,?,?,?,?,?,?)',
+                    (int(time.time()), 'alice', 'data', 'new_tool', 1, 'ok', ''))
+        con.commit()
+        con.close()
+        n = self.store.prune_calls(30)
+        self.assertEqual(n, 1)
+        rows = self.store.recent_calls('alice')
+        self.assertEqual([r['tool'] for r in rows], ['new_tool'])
+
+    # -- 管理 API：state 扩展 / key 详情 ------------------------------
+
+    def test_admin_state_series_and_stats(self):
+        for _ in range(2):
+            self.call(self.data_port, 'POST', '/data/messages',
+                      rpc_call('get_price'), token='tok-alice')
+        self.call(self.data_port, 'POST', '/alpha/messages',
+                  rpc_call('t'), token='tok-alice')
+        self.call(self.data_port, 'POST', '/alpha/messages',
+                  rpc_call('t'), token='tok-alice')
+        self.call(self.data_port, 'POST', '/alpha/messages',
+                  rpc_call('t'), token='tok-alice')  # 第 3 次 alpha → 429
+        s, raw = self.call(self.admin_port, 'GET', '/api/state', admin_token='secret-test')
+        self.assertEqual(s, 200)
+        state = json.loads(raw)
+        series = state['series_7d']
+        self.assertEqual(len(series), 7)
+        today = series[-1]
+        self.assertEqual(today['date'], time.strftime('%Y-%m-%d'))
+        self.assertEqual(today['total'], 5)
+        self.assertEqual(today['blocked'], 1)
+        self.assertAlmostEqual(state['today_success_rate'], 4 / 5, places=3)
+        self.assertIsNotNone(state['today_latency']['p50'])
+        self.assertIn('p95', state['today_latency'])
+
+    def test_key_detail_api(self):
+        self.call(self.data_port, 'POST', '/alpha/messages', rpc_call('t'), token='tok-alice')
+        self.call(self.data_port, 'POST', '/data/messages', rpc_call('u'), token='tok-alice')
+        s, raw = self.call(self.admin_port, 'GET', '/api/key/alice', admin_token='secret-test')
+        self.assertEqual(s, 200)
+        d = json.loads(raw)
+        self.assertEqual(d['key'], 'alice')
+        self.assertTrue(d['in_inventory'])
+        self.assertFalse(d['disabled'])
+        self.assertIsNone(d['expires_at'])
+        groups = {u['group_name'] for u in d['usage']}
+        self.assertEqual(groups, {'alpha', 'data'})
+        alpha_usage = [u for u in d['usage'] if u['group_name'] == 'alpha'][0]
+        self.assertEqual(alpha_usage['day_calls'], 1)
+        self.assertIn('alpha', d['limits'])
+        self.assertEqual(d['limits']['alpha']['daily'], 2)  # paid 档
+        self.assertEqual(len(d['recent_calls']), 2)
+        self.assertEqual(d['recent_calls'][0]['tool'], 'u')  # 倒序
+        self.assertEqual(d['success_rate'], 1.0)
+        # 未鉴权不可用
+        s, _ = self.call(self.admin_port, 'GET', '/api/key/alice')
+        self.assertEqual(s, 401)
+
+    # -- key 禁用 / 过期 ----------------------------------------------
+
+    def test_key_disable_enable(self):
+        s, raw = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                           json.dumps({'disabled': True}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 200)
+        self.assertTrue(json.loads(raw)['disabled'])
+        # 数据面拦截，403 + 中文文案，先于配额检查（free 组也不放行）
+        s, raw = self.call(self.data_port, 'POST', '/data/messages',
+                           rpc_call('get_price'), token='tok-alice')
+        self.assertEqual(s, 403)
+        err = json.loads(raw)['error']
+        self.assertEqual(err['message'], 'key 已禁用')
+        self.assertEqual(MockUpstreamHandler.hits, 0)  # 未触达上游
+        # 落流水 reason=disabled
+        rows = self.store.recent_calls('alice')
+        self.assertEqual(rows[0]['status'], 'blocked')
+        self.assertEqual(rows[0]['reason'], 'disabled')
+        # 持久化到 config.json，且不影响其他字段
+        with open(self.cfg_path) as f:
+            on_disk = json.load(f)
+        self.assertTrue(on_disk['key_overrides']['alice']['disabled'])
+        self.assertIn('tiers', on_disk)
+        # 恢复启用
+        s, _ = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                         json.dumps({'disabled': False}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 200)
+        s, _ = self.call(self.data_port, 'POST', '/data/messages',
+                         rpc_call('get_price'), token='tok-alice')
+        self.assertEqual(s, 200)
+
+    def test_key_expiry(self):
+        past = int(time.time()) - 60
+        s, _ = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                         json.dumps({'expires_at': past}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 200)
+        s, raw = self.call(self.data_port, 'POST', '/data/messages',
+                           rpc_call('get_price'), token='tok-alice')
+        self.assertEqual(s, 403)
+        self.assertEqual(json.loads(raw)['error']['message'], 'key 已过期')
+        # 清掉过期时间恢复
+        s, _ = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                         json.dumps({'expires_at': None}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 200)
+        s, _ = self.call(self.data_port, 'POST', '/data/messages',
+                         rpc_call('get_price'), token='tok-alice')
+        self.assertEqual(s, 200)
+        # 未来时间不过期
+        s, _ = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                         json.dumps({'expires_at': int(time.time()) + 3600}).encode(),
+                         admin_token='secret-test')
+        self.assertEqual(s, 200)
+        s, _ = self.call(self.data_port, 'POST', '/data/messages',
+                         rpc_call('get_price'), token='tok-alice')
+        self.assertEqual(s, 200)
+
+    def test_key_status_validation(self):
+        s, _ = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                         json.dumps({'disabled': 'yes'}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 400)
+        s, _ = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                         json.dumps({'expires_at': 'tomorrow'}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 400)
+        s, _ = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                         json.dumps({'disabled': True}).encode())
+        self.assertEqual(s, 401)
+
+    def test_status_preserves_tier_override(self):
+        good = json.dumps({'key_overrides': {
+            'alice': {'tier_by_group': {'alpha': {'daily': 50, 'monthly': 100, 'heavy_daily': 5}}}
+        }}).encode()
+        s, _ = self.call(self.admin_port, 'POST', '/api/config', good, admin_token='secret-test')
+        self.assertEqual(s, 200)
+        s, _ = self.call(self.admin_port, 'POST', '/api/key/alice/status',
+                         json.dumps({'disabled': True}).encode(), admin_token='secret-test')
+        self.assertEqual(s, 200)
+        ov = self.cfg.current()['key_overrides']['alice']
+        self.assertTrue(ov['disabled'])
+        self.assertEqual(ov['tier_by_group']['alpha']['daily'], 50)  # 额度覆盖未被覆盖
 
 
 if __name__ == '__main__':
