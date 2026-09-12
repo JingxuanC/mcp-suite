@@ -39,10 +39,10 @@
   .pill.ok { color: var(--ok); border-color: var(--ok); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
-  textarea { width: 100%; min-height: 190px; background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font: 12px/1.5 var(--mono); resize: vertical; }
   .btnrow { display: flex; gap: 10px; align-items: center; padding: 12px 16px; flex-wrap: wrap; }
   button { background: var(--accent); color: #14100a; border: none; border-radius: 6px; padding: 7px 18px; font-weight: 600; cursor: pointer; font-size: 13px; }
   button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+  button.sml { padding: 3px 12px; font-size: 12px; }
   button:hover { filter: brightness(1.1); }
   #msg { color: var(--ok); font-size: 12px; }
   #msg.err { color: var(--bad); }
@@ -62,14 +62,32 @@
   .sw .tr::before { content: ""; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; background: var(--dim); border-radius: 50%; transition: .15s; }
   .sw input:checked + .tr { background: rgba(76,175,125,.25); border-color: var(--ok); }
   .sw input:checked + .tr::before { transform: translateX(18px); background: var(--ok); }
+  /* 编辑器输入控件 */
+  input.num-in, input.txt-in, select.sel { background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: 12px var(--mono); }
+  input.num-in { width: 90px; }
+  input.txt-in { width: 150px; }
+  input.bad-in { border-color: var(--bad); }
+  /* 迷你进度条 */
+  .pbar { width: 100px; height: 8px; background: #0b0d11; border: 1px solid var(--line); border-radius: 99px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 8px; }
+  .pbar i { display: block; height: 100%; background: var(--ok); }
+  .pbar.hot i { background: var(--accent); }
+  .pbar.over i { background: var(--bad); }
+  /* heavy_tools 标签 */
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px 2px; }
+  .chip { background: #0b0d11; border: 1px solid var(--line); border-radius: 99px; padding: 3px 6px 3px 12px; font: 12px var(--mono); display: inline-flex; gap: 8px; align-items: center; }
+  .chip b { color: var(--dim); cursor: pointer; padding: 0 4px; }
+  .chip b:hover { color: var(--bad); }
+  .chip-input { margin: 10px 16px 4px; background: #0b0d11; border: 1px solid var(--line); color: var(--text); border-radius: 6px; padding: 6px 10px; font: 12px var(--mono); width: calc(100% - 32px); }
+  /* 拦截横幅 */
+  .banner { background: rgba(224,93,93,.12); border: 1px solid var(--bad); color: var(--bad); border-radius: 8px; padding: 10px 14px; margin-bottom: 18px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 13px; }
   /* key 下钻 */
   .keyhead { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
   .keyhead h2 { font-size: 17px; font-weight: 600; font-family: var(--mono); }
   .keyhead .grow { flex: 1; }
   input.dt { background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: 12px var(--mono); color-scheme: dark; }
   .tbl-wrap { overflow-x: auto; }
-  #kmsg { color: var(--ok); font-size: 12px; }
-  #kmsg.err { color: var(--bad); }
+  #kmsg, #kovmsg { color: var(--ok); font-size: 12px; }
+  #kmsg.err, #kovmsg.err { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -123,34 +141,40 @@
 
     <div class="grid2">
       <section>
-        <h2>配额规则 · tiers（档位定义）</h2>
-        <textarea id="tiers" spellcheck="false"></textarea>
-      </section>
-      <section>
-        <h2>配额规则 · groups（分组→档位）</h2>
-        <textarea id="groups" spellcheck="false"></textarea>
-      </section>
-    </div>
-    <div class="grid2">
-      <section>
-        <h2>配额规则 · key 覆盖</h2>
-        <textarea id="key_overrides" spellcheck="false"></textarea>
-      </section>
-      <section>
-        <h2>重度工具名单</h2>
-        <textarea id="heavy_tools" spellcheck="false" style="min-height:90px"></textarea>
-        <div class="btnrow">
-          <button onclick="saveRules()">保存规则</button>
-          <button class="ghost" onclick="reloadInventory()">重载 key 库存</button>
-          <span id="msg"></span>
+        <h2>配额规则 · tiers（档位：留空 = 不限）</h2>
+        <div class="tbl-wrap">
+        <table><thead><tr><th>档位名</th><th class="num">daily</th><th class="num">monthly</th><th class="num">heavy_daily</th><th></th></tr></thead>
+        <tbody id="tiers_rows"></tbody></table>
         </div>
+        <div class="btnrow"><button class="ghost sml" onclick="addTierRow()">＋ 新增档位</button></div>
+      </section>
+      <section>
+        <h2>配额规则 · groups（分组 → 档位）</h2>
+        <div class="tbl-wrap">
+        <table><thead><tr><th>组名</th><th>档位</th><th></th></tr></thead>
+        <tbody id="groups_rows"></tbody></table>
+        </div>
+        <div class="btnrow"><button class="ghost sml" onclick="addGroupRow()">＋ 新增分组</button></div>
       </section>
     </div>
 
     <section>
+      <h2>重度工具名单（回车添加，× 删除）</h2>
+      <div class="chips" id="heavy_chips"></div>
+      <input class="chip-input" id="heavy_input" placeholder="输入工具名后回车，如 factor_backtest" spellcheck="false">
+      <div class="btnrow">
+        <button onclick="saveRules()">保存规则（tiers / groups / 重度工具）</button>
+        <button class="ghost" onclick="discardCfg()">放弃修改</button>
+        <button class="ghost" onclick="reloadInventory()">重载 key 库存</button>
+        <span id="msg"></span>
+      </div>
+      <p class="muted" style="padding:0 16px 12px">key 级配额覆盖不再在此编辑：到下方 key 库存点名称进下钻，用「配额覆盖」编辑器按 key 管理。</p>
+    </section>
+
+    <section>
       <h2>key 库存（点击名称进入下钻；开关控制禁用/启用）</h2>
       <div class="tbl-wrap">
-      <table><thead><tr><th>名称</th><th>属主</th><th>类型</th><th>accessType</th><th>允许分组</th><th>启用</th><th>过期时间</th></tr></thead>
+      <table><thead><tr><th>名称</th><th>属主</th><th>类型</th><th>允许分组</th><th>今日用量/上限（最紧张组）</th><th>启用</th><th>过期时间</th><th>操作</th></tr></thead>
       <tbody id="inventory"></tbody></table>
       </div>
       <p class="muted" style="padding:10px 16px">陌生 key 与 OAuth 短期 token 自动落入 anonymous + default 档；完整 token 仅存于 mcphub 侧，本平台只读。禁用/过期状态存于 config.json 的 key_overrides。</p>
@@ -167,12 +191,28 @@
       <label class="muted">启用 <label class="sw"><input type="checkbox" id="kenabled" onchange="toggleKey(this.checked)"><span class="tr"></span></label></label>
     </div>
 
+    <div id="kbanner"></div>
+
     <div class="cards">
       <div class="card ok"><div class="num" id="k_success">–</div><div class="lbl">今日成功率</div></div>
       <div class="card"><div class="num" id="k_p50">–</div><div class="lbl">今日延迟 p50</div></div>
       <div class="card"><div class="num" id="k_p95">–</div><div class="lbl">今日延迟 p95</div></div>
       <div class="card"><div class="num" id="k_today">–</div><div class="lbl">今日流水条数</div></div>
     </div>
+
+    <section id="kov-section">
+      <h2>配额覆盖（仅对该 key 生效，优先于分组档位；留空 = 不限）</h2>
+      <div class="tbl-wrap">
+      <table><thead><tr><th>分组</th><th class="num">daily</th><th class="num">monthly</th><th class="num">heavy_daily</th><th></th></tr></thead>
+      <tbody id="kov_rows"></tbody></table>
+      </div>
+      <div class="btnrow">
+        <select class="sel" id="kov_add"></select>
+        <button class="ghost sml" onclick="addKovRow()">＋ 添加组覆盖</button>
+        <button onclick="saveKeyOverrides()">保存该 key 覆盖</button>
+        <span id="kovmsg"></span>
+      </div>
+    </section>
 
     <section>
       <h2>过期时间（到期后数据面返回 403「key 已过期」）</h2>
@@ -218,8 +258,12 @@ const tokenInput = $('token');
 tokenInput.value = localStorage.getItem('qp_admin_token') || '';
 tokenInput.addEventListener('change', () => { localStorage.setItem('qp_admin_token', tokenInput.value); load(); });
 
-let currentKey = null;   // 非空 = 下钻视图
+let currentKey = null;    // 非空 = 下钻视图
 let lastState = null;
+let cfgDirty = false;     // tiers/groups/heavy_tools 编辑器有未保存修改（15s 自动刷新时不重绘）
+let kovDirty = false;     // key 覆盖编辑器同上
+let pendingFocus = null;  // 提额跳转：进入下钻后要聚焦的组名
+let lastKeyDetail = null; // 当前下钻 key 的详情（提额预填用）
 
 async function api(path, opts = {}) {
   // 相对路径：经 nginx /quota/ 反代时不能发 /api/* 绝对路径（会落到 location / 的官网）
@@ -236,6 +280,43 @@ function fmt(n) { return (n ?? 0).toLocaleString('en-US'); }
 function fmtTs(ts) { return ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : '—'; }
 function fmtPct(r) { return r == null ? '–' : (r * 100).toFixed(1) + '%'; }
 function fmtMs(v) { return v == null ? '–' : fmt(Math.round(v)); }
+
+/* ---------------- 客户端配额解析（镜像 server.resolve_limits） ---------------- */
+
+function resolveLimitsJS(cfg, keyName, group) {
+  const ov = (cfg.key_overrides || {})[keyName] || {};
+  const pg = ov.tier_by_group || {};
+  if (pg[group]) return pg[group];
+  const tier = ((cfg.groups || {})[group] || {}).tier || 'default';
+  return (cfg.tiers || {})[tier] || (cfg.tiers || {}).default || {};
+}
+
+// 该 key 今日最紧张的一处用量：跨组比较 调用/daily 与 重度/heavy_daily 的比例
+function keyPressure(name) {
+  if (!lastState) return null;
+  let best = null;
+  for (const r of lastState.key_usage.filter(x => x.key_name === name)) {
+    const lim = resolveLimitsJS(lastState.config, name, r.group_name);
+    for (const [used, cap, kind] of [[r.calls, lim.daily, 'daily'], [r.heavy, lim.heavy_daily, 'heavy_daily']]) {
+      if (cap == null) continue;
+      const ratio = cap === 0 ? (used > 0 ? 99 : 0) : used / cap;
+      if (!best || ratio > best.ratio) best = { group: r.group_name, used, cap, ratio, kind };
+    }
+  }
+  return best;
+}
+
+// 今日有 daily/heavy_daily 拦截的 key → 拦截记录（基于 recent_blocks 最近 50 条）
+function blockedTodayMap() {
+  const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+  const m = {};
+  for (const b of (lastState && lastState.recent_blocks) || []) {
+    if (b.ts * 1000 >= t0.getTime() && (b.reason === 'daily' || b.reason === 'heavy_daily')) {
+      (m[b.key_name] = m[b.key_name] || []).push(b);
+    }
+  }
+  return m;
+}
 
 /* ---------------- 总览 ---------------- */
 
@@ -273,21 +354,33 @@ async function load() {
     `<td><span class="pill blocked">${reasons[b.reason] || esc(b.reason)}</span></td></tr>`).join('') ||
     '<tr><td colspan="4" class="muted">暂无拦截</td></tr>';
 
-  $('tiers').value = JSON.stringify(d.config.tiers, null, 2);
-  $('groups').value = JSON.stringify(d.config.groups, null, 2);
-  $('key_overrides').value = JSON.stringify(d.config.key_overrides, null, 2);
-  $('heavy_tools').value = JSON.stringify(d.config.heavy_tools, null, 2);
+  if (!cfgDirty) {
+    renderTiersEditor(d.config.tiers || {});
+    renderGroupsEditor(d.config.groups || {});
+    renderHeavyChips(d.config.heavy_tools || []);
+  }
 
   const ov = d.config.key_overrides || {};
+  const blocked = blockedTodayMap();
   $('inventory').innerHTML = d.inventory.map(k => {
     const o = ov[k.name] || {};
-    return `<tr><td><a class="klink" onclick="openKey(${js(k.name)})">${esc(k.name)}</a></td>` +
-      `<td>${esc(k.owner) || '—'}</td><td>${esc(k.kind)}</td><td>${esc(k.accessType)}</td>` +
+    const p = keyPressure(k.name);
+    let bar = '<span class="muted">—</span>';
+    if (p) {
+      const cls = p.ratio >= 1 ? 'over' : p.ratio >= 0.7 ? 'hot' : '';
+      bar = `<span class="pbar ${cls}"><i style="width:${Math.min(100, p.ratio * 100)}%"></i></span>` +
+            `<span class="muted">${esc(p.group)} ${fmt(p.used)}/${fmt(p.cap)}</span>`;
+    }
+    const blk = blocked[k.name] ? ' <span class="pill blocked">今日被拦截</span>' : '';
+    return `<tr><td><a class="klink" onclick="openKey(${js(k.name)})">${esc(k.name)}</a>${blk}</td>` +
+      `<td>${esc(k.owner) || '—'}</td><td>${esc(k.kind)}</td>` +
       `<td>${(k.allowedGroups || []).map(esc).join(', ') || '全部'}</td>` +
+      `<td>${bar}</td>` +
       `<td><label class="sw"><input type="checkbox" ${o.disabled ? '' : 'checked'} onchange="setDisabled(${js(k.name)}, !this.checked)"><span class="tr"></span></label></td>` +
-      `<td class="muted">${o.expires_at ? fmtTs(o.expires_at) : '—'}</td></tr>`;
-  }).join('') || '<tr><td colspan="7" class="muted">库存为空（检查 mcp_settings.json 挂载）</td></tr>';
-  msg('');
+      `<td class="muted">${o.expires_at ? fmtTs(o.expires_at) : '—'}</td>` +
+      `<td><button class="ghost sml" onclick="boostKey(${js(k.name)})">提额</button></td></tr>`;
+  }).join('') || '<tr><td colspan="8" class="muted">库存为空（检查 mcp_settings.json 挂载）</td></tr>';
+  if (!cfgDirty) msg('');
 }
 
 /* ---------------- 7 天折线图（Canvas 手绘） ---------------- */
@@ -332,13 +425,218 @@ function drawChart(canvas, series) {
   line(series.map(s => s.blocked), css('--bad'));
 }
 
+/* ---------------- tiers 编辑器 ---------------- */
+
+function markCfgDirty() { cfgDirty = true; msg('有未保存修改', true); }
+
+function tierRowHtml(t) {
+  const v = x => x == null ? '' : x;
+  return `<tr><td><input class="txt-in tier-name" value="${esc(t.name)}" placeholder="档位名" oninput="markCfgDirty();syncGroupTierOptions()"></td>` +
+    `<td><input type="number" min="0" class="num-in tier-daily" value="${v(t.daily)}" oninput="markCfgDirty()"></td>` +
+    `<td><input type="number" min="0" class="num-in tier-monthly" value="${v(t.monthly)}" oninput="markCfgDirty()"></td>` +
+    `<td><input type="number" min="0" class="num-in tier-heavy" value="${v(t.heavy_daily)}" oninput="markCfgDirty()"></td>` +
+    `<td><button class="ghost sml" onclick="delTierRow(this)">删</button></td></tr>`;
+}
+
+function renderTiersEditor(tiers) {
+  $('tiers_rows').innerHTML = Object.entries(tiers).map(([name, t]) => tierRowHtml({ name, ...t })).join('') ||
+    '<tr><td colspan="5" class="muted">无档位</td></tr>';
+}
+
+function addTierRow() {
+  const tb = $('tiers_rows');
+  const empty = tb.querySelector('.muted');
+  if (empty) tb.innerHTML = '';
+  tb.insertAdjacentHTML('beforeend', tierRowHtml({ name: '', daily: null, monthly: null, heavy_daily: null }));
+  markCfgDirty();
+  tb.lastElementChild.querySelector('.tier-name').focus();
+}
+
+function delTierRow(btn) {
+  const tr = btn.closest('tr');
+  const name = tr.querySelector('.tier-name').value.trim();
+  const usedBy = [...$('groups_rows').querySelectorAll('.group-tier')]
+    .filter(s => s.value === name).length;
+  const usedBySaved = Object.entries((lastState && lastState.config.groups) || {})
+    .filter(([, g]) => g.tier === name).map(([g]) => g);
+  const refs = [...new Set([...usedBySaved, ...usedBy ? ['（编辑器中）'] : []])];
+  if (name && (usedBy || usedBySaved.length) &&
+      !confirm(`档位「${name}」正被分组引用：${refs.join('、')}\n删除后这些分组会落到 default 档。确认删除？`)) return;
+  tr.remove(); markCfgDirty(); syncGroupTierOptions();
+}
+
+// tiers 编辑器当前档位名列表（供 groups 下拉）
+function tierNames() {
+  return [...$('tiers_rows').querySelectorAll('.tier-name')].map(i => i.value.trim()).filter(Boolean);
+}
+
+/* ---------------- groups 编辑器 ---------------- */
+
+function groupRowHtml(name, tier) {
+  return `<tr><td><input class="txt-in group-name" value="${esc(name)}" placeholder="组名" oninput="markCfgDirty()"></td>` +
+    `<td><select class="sel group-tier" onchange="markCfgDirty()"></select></td>` +
+    `<td><button class="ghost sml" onclick="delGroupRow(this)">删</button></td></tr>`;
+}
+
+function renderGroupsEditor(groups) {
+  $('groups_rows').innerHTML = Object.entries(groups).map(([g, v]) => groupRowHtml(g, v.tier)).join('') ||
+    '<tr><td colspan="3" class="muted">无分组</td></tr>';
+  [...$('groups_rows').querySelectorAll('tr')].forEach((tr, i) => {
+    const sel = tr.querySelector('.group-tier');
+    if (sel) setTierOptions(sel, Object.values(groups)[i] && Object.values(groups)[i].tier);
+  });
+}
+
+function setTierOptions(sel, current) {
+  const names = tierNames();
+  const opts = [...names];
+  if (current && !opts.includes(current)) opts.push(current);  // 保留失效引用，保存时校验会拦
+  sel.innerHTML = opts.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  if (current) sel.value = current;
+}
+
+function syncGroupTierOptions() {
+  $('groups_rows').querySelectorAll('.group-tier').forEach(s => setTierOptions(s, s.value));
+}
+
+function addGroupRow() {
+  const tb = $('groups_rows');
+  if (tb.querySelector('.muted')) tb.innerHTML = '';
+  tb.insertAdjacentHTML('beforeend', groupRowHtml('', tierNames()[0] || ''));
+  const tr = tb.lastElementChild;
+  setTierOptions(tr.querySelector('.group-tier'), tierNames()[0] || '');
+  markCfgDirty();
+  tr.querySelector('.group-name').focus();
+}
+
+function delGroupRow(btn) {
+  const tr = btn.closest('tr');
+  const name = tr.querySelector('.group-name').value.trim();
+  // 被 key_overrides.tier_by_group 引用的组删除前确认
+  const refKeys = Object.entries((lastState && lastState.config.key_overrides) || {})
+    .filter(([, e]) => (e.tier_by_group || {})[name]).map(([k]) => k);
+  if (name && refKeys.length &&
+      !confirm(`组「${name}」被以下 key 的配额覆盖引用：${refKeys.join('、')}\n删除分组后这些覆盖仍会按 key 生效，但组路由将归 global/default。确认删除？`)) return;
+  tr.remove(); markCfgDirty();
+}
+
+/* ---------------- heavy_tools 标签编辑器 ---------------- */
+
+function renderHeavyChips(list) {
+  $('heavy_chips').innerHTML = list.map(t =>
+    `<span class="chip"><span>${esc(t)}</span><b title="删除" onclick="heavyDel(this)">×</b></span>`).join('') ||
+    '<span class="muted">（空 = 无重度工具）</span>';
+}
+
+function heavyDel(b) { b.closest('.chip').remove(); markCfgDirty(); }
+
+$('heavy_input').addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const v = e.target.value.trim();
+  if (!v) return;
+  const exist = [...$('heavy_chips').querySelectorAll('.chip span')].some(s => s.textContent === v);
+  if (exist) { msg(`「${v}」已在名单中`, true); return; }
+  const empty = $('heavy_chips').querySelector('.muted');
+  if (empty) empty.remove();
+  $('heavy_chips').insertAdjacentHTML('beforeend',
+    `<span class="chip"><span>${esc(v)}</span><b title="删除" onclick="heavyDel(this)">×</b></span>`);
+  e.target.value = '';
+  markCfgDirty();
+});
+
+/* ---------------- 规则保存 ---------------- */
+
+function msg(text, isErr) {
+  const m = $('msg'); m.textContent = text; m.className = isErr ? 'err' : '';
+}
+function kmsg(text, isErr) {
+  const m = $('kmsg'); m.textContent = text; m.className = isErr ? 'err' : '';
+}
+function kovmsg(text, isErr) {
+  const m = $('kovmsg'); m.textContent = text; m.className = isErr ? 'err' : '';
+}
+
+function parseNum(v, label) {
+  v = String(v).trim();
+  if (v === '') return null;  // 留空 = 不限
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${label} 必须是非负整数或留空`);
+  return n;
+}
+
+function collectTiers() {
+  const tiers = {};
+  for (const tr of $('tiers_rows').querySelectorAll('tr')) {
+    const nameEl = tr.querySelector('.tier-name');
+    if (!nameEl) continue;
+    const name = nameEl.value.trim();
+    if (!name) { nameEl.classList.add('bad-in'); throw new Error('档位名不能为空'); }
+    if (tiers[name]) { nameEl.classList.add('bad-in'); throw new Error(`档位名重复：${name}`); }
+    tiers[name] = {
+      daily: parseNum(tr.querySelector('.tier-daily').value, `${name}.daily`),
+      monthly: parseNum(tr.querySelector('.tier-monthly').value, `${name}.monthly`),
+      heavy_daily: parseNum(tr.querySelector('.tier-heavy').value, `${name}.heavy_daily`),
+    };
+  }
+  if (!Object.keys(tiers).length) throw new Error('至少保留一个档位');
+  return tiers;
+}
+
+function collectGroups(tiers) {
+  const groups = {};
+  for (const tr of $('groups_rows').querySelectorAll('tr')) {
+    const nameEl = tr.querySelector('.group-name');
+    if (!nameEl) continue;
+    const name = nameEl.value.trim();
+    if (!name) { nameEl.classList.add('bad-in'); throw new Error('组名不能为空'); }
+    if (groups[name]) { nameEl.classList.add('bad-in'); throw new Error(`组名重复：${name}`); }
+    const tier = tr.querySelector('.group-tier').value;
+    if (!tiers[tier]) throw new Error(`组「${name}」引用了不存在的档位「${tier}」`);
+    groups[name] = { tier };
+  }
+  return groups;
+}
+
+function collectHeavy() {
+  return [...$('heavy_chips').querySelectorAll('.chip span')].map(s => s.textContent);
+}
+
+async function saveRules() {
+  document.querySelectorAll('.bad-in').forEach(el => el.classList.remove('bad-in'));
+  let body;
+  try {
+    const tiers = collectTiers();
+    body = { tiers, groups: collectGroups(tiers), heavy_tools: collectHeavy() };
+  } catch (e) { return msg(e.message, true); }
+  try {
+    await api('/api/config', { method: 'POST', body: JSON.stringify(body) });
+    cfgDirty = false; msg('已保存并生效'); load();
+  } catch (e) { msg('保存失败：' + e.message, true); }
+}
+
+function discardCfg() { cfgDirty = false; load(); msg('已放弃未保存修改'); }
+
+async function reloadInventory() {
+  try { const r = await api('/api/reload_inventory', { method: 'POST' }); msg(`库存已重载（${r.keys} 个 key）`); load(); }
+  catch (e) { msg('重载失败：' + e.message, true); }
+}
+
 /* ---------------- key 下钻 ---------------- */
 
-function openKey(name) {
+function openKey(name, focusGroup) {
   currentKey = name;
+  pendingFocus = focusGroup || null;
+  kovDirty = false;
   $('view-main').style.display = 'none';
   $('view-key').style.display = '';
   loadKey(currentKey);
+}
+
+// 一键提额：进下钻、定位配额编辑器、聚焦最紧张组的 daily 输入
+function boostKey(name) {
+  const p = keyPressure(name);
+  openKey(name, p && p.group);
 }
 
 function backToMain() {
@@ -349,9 +647,11 @@ function backToMain() {
 }
 
 async function loadKey(name) {
-  let d;
-  try { d = await api('/api/key/' + encodeURIComponent(name)); }
-  catch (e) { kmsg('加载失败：' + e.message, true); return; }
+  let d, st;
+  try {
+    [d, st] = await Promise.all([api('/api/key/' + encodeURIComponent(name)), api('/api/state')]);
+  } catch (e) { kmsg('加载失败：' + e.message, true); return; }
+  lastKeyDetail = d;
   $('kname').textContent = d.key;
   const badges = [];
   if (d.disabled) badges.push('<span class="pill blocked">已禁用</span>');
@@ -366,6 +666,21 @@ async function loadKey(name) {
   $('k_p50').textContent = fmtMs(d.latency && d.latency.p50);
   $('k_p95').textContent = fmtMs(d.latency && d.latency.p95);
   $('k_today').textContent = fmt(d.today_calls);
+
+  // 拦截联动横幅：今日流水中出现配额类拦截 → 提示 + 提额入口
+  const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+  const quotaBlocks = d.recent_calls.filter(r =>
+    r.status === 'blocked' && ['daily', 'heavy_daily', 'monthly'].includes(r.reason) && r.ts * 1000 >= t0.getTime());
+  if (quotaBlocks.length) {
+    const byGroup = {};
+    quotaBlocks.forEach(r => { byGroup[r.group_name] = byGroup[r.group_name] || []; byGroup[r.group_name].push(r.reason); });
+    const desc = Object.entries(byGroup).map(([g, rs]) =>
+      `${g}（${rs.map(r => ({ daily: '日配额', heavy_daily: '重度日配额', monthly: '月配额' }[r])).join('、')}）`).join('，');
+    $('kbanner').innerHTML = `<div class="banner">⚠ 今日配额拦截：${esc(desc)}` +
+      `<button class="sml" onclick="boostFromBanner(${js(quotaBlocks[0].group_name)})">去提额</button></div>`;
+  } else {
+    $('kbanner').innerHTML = '';
+  }
 
   $('k_usage').innerHTML = d.usage.map(u =>
     `<tr><td>${esc(u.group_name)}</td><td class="num">${fmt(u.day_calls)}</td><td class="num">${fmt(u.day_heavy)}</td>` +
@@ -382,8 +697,123 @@ async function loadKey(name) {
     `<tr><td class="muted">${fmtTs(r.ts)}</td><td>${esc(r.group_name)}</td><td style="font-family:var(--mono)">${esc(r.tool)}</td>` +
     `<td class="num">${fmt(r.latency_ms)}</td><td>${stPill[r.status] || esc(r.status)}</td><td class="muted">${esc(r.reason) || '—'}</td></tr>`).join('') ||
     '<tr><td colspan="6" class="muted">暂无流水（旧数据在升级前未记录）</td></tr>';
+
+  if (!kovDirty) renderKovEditor(name, d, st);
+
+  // 提额跳转：目标组无覆盖行则预填当前生效档新增一行，然后滚动 + 聚焦 daily
+  if (pendingFocus) {
+    const g = pendingFocus;
+    pendingFocus = null;
+    let tr = kovRow(g);
+    if (!tr) {
+      addKovRow(g, d.limits[g] || {});
+      tr = kovRow(g);
+    }
+    if (tr) {
+      tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const inp = tr.querySelector('.kov-daily');
+      if (inp) { inp.focus(); inp.select(); }
+    }
+  }
   kmsg('');
 }
+
+function boostFromBanner(group) { pendingFocus = group; loadKey(currentKey); }
+
+/* ---------------- key 配额覆盖编辑器 ---------------- */
+
+function markKovDirty() { kovDirty = true; kovmsg('有未保存修改', true); }
+
+function kovRow(g) {
+  return [...$('kov_rows').querySelectorAll('tr')].find(tr => tr.dataset.g === g);
+}
+
+function kovRowHtml(g, lim) {
+  const v = x => x == null ? '' : x;
+  return `<tr data-g="${esc(g)}"><td style="font-family:var(--mono)">${esc(g)}</td>` +
+    `<td><input type="number" min="0" class="num-in kov-daily" value="${v(lim.daily)}" oninput="markKovDirty()"></td>` +
+    `<td><input type="number" min="0" class="num-in kov-monthly" value="${v(lim.monthly)}" oninput="markKovDirty()"></td>` +
+    `<td><input type="number" min="0" class="num-in kov-heavy" value="${v(lim.heavy_daily)}" oninput="markKovDirty()"></td>` +
+    `<td><button class="ghost sml" onclick="delKovRow(this)">删</button></td></tr>`;
+}
+
+function renderKovEditor(name, d, st) {
+  const entry = ((st.config.key_overrides || {})[name]) || {};
+  const tbg = entry.tier_by_group || {};
+  $('kov_rows').innerHTML = Object.entries(tbg).map(([g, lim]) => kovRowHtml(g, lim)).join('') ||
+    '<tr><td colspan="5" class="muted">无覆盖 —— 该 key 完全跟随分组档位</td></tr>';
+  // 添加组下拉：配置组 ∪ 有用量组 ∪ 已有覆盖组之外
+  const existing = new Set(Object.keys(tbg));
+  const candidates = [...new Set([...Object.keys(st.config.groups || {}),
+    ...d.usage.map(u => u.group_name), 'global'])].filter(g => !existing.has(g));
+  $('kov_add').innerHTML = candidates.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('') ||
+    '<option value="">（所有组均已覆盖）</option>';
+}
+
+function addKovRow(presetGroup, presetLim) {
+  const g = presetGroup || $('kov_add').value;
+  if (!g) return kovmsg('请选择要覆盖的组', true);
+  if (kovRow(g)) return kovmsg(`组「${g}」已有覆盖行`, true);
+  const tb = $('kov_rows');
+  if (tb.querySelector('.muted')) tb.innerHTML = '';
+  tb.insertAdjacentHTML('beforeend', kovRowHtml(g, presetLim || {}));
+  markKovDirty();
+  if (!presetGroup) kovmsg(`已添加组「${g}」，填入额度后保存`);
+}
+
+function delKovRow(btn) {
+  btn.closest('tr').remove();
+  if (!$('kov_rows').querySelector('tr'))
+    $('kov_rows').innerHTML = '<tr><td colspan="5" class="muted">无覆盖 —— 该 key 完全跟随分组档位</td></tr>';
+  markKovDirty();
+}
+
+function collectKov() {
+  const tbg = {};
+  for (const tr of $('kov_rows').querySelectorAll('tr')) {
+    if (!tr.dataset.g) continue;
+    tbg[tr.dataset.g] = {
+      daily: parseNum(tr.querySelector('.kov-daily').value, `${tr.dataset.g}.daily`),
+      monthly: parseNum(tr.querySelector('.kov-monthly').value, `${tr.dataset.g}.monthly`),
+      heavy_daily: parseNum(tr.querySelector('.kov-heavy').value, `${tr.dataset.g}.heavy_daily`),
+    };
+  }
+  return tbg;
+}
+
+function kovDiffText(oldTbg, newTbg) {
+  const fmtL = l => l == null ? '不限' : l;
+  const lines = [];
+  for (const g of new Set([...Object.keys(oldTbg), ...Object.keys(newTbg)])) {
+    const o = oldTbg[g], n = newTbg[g];
+    if (o && !n) { lines.push(`删除组「${g}」的覆盖（回落分组档位）`); continue; }
+    if (!o && n) { lines.push(`新增组「${g}」覆盖：daily=${fmtL(n.daily)} monthly=${fmtL(n.monthly)} heavy_daily=${fmtL(n.heavy_daily)}`); continue; }
+    const ch = ['daily', 'monthly', 'heavy_daily'].filter(k => (o[k] ?? null) !== (n[k] ?? null));
+    if (ch.length) lines.push(`组「${g}」：${ch.map(k => `${k} ${fmtL(o[k])} → ${fmtL(n[k])}`).join('，')}`);
+  }
+  return lines;
+}
+
+async function saveKeyOverrides() {
+  document.querySelectorAll('.bad-in').forEach(el => el.classList.remove('bad-in'));
+  let tbg;
+  try { tbg = collectKov(); } catch (e) { return kovmsg(e.message, true); }
+  let st;
+  try { st = await api('/api/state'); }  // 拉最新，避免覆盖其他管理员的并发改动
+  catch (e) { return kovmsg('读取最新配置失败：' + e.message, true); }
+  const all = st.config.key_overrides || {};
+  const prev = all[currentKey] || {};
+  const diff = kovDiffText(prev.tier_by_group || {}, tbg);
+  if (!diff.length) { kovDirty = false; return kovmsg('无改动'); }
+  if (!confirm(`将为 key「${currentKey}」保存配额覆盖（disabled/expires_at 等其余字段保持不变）：\n\n${diff.join('\n')}`)) return;
+  const newAll = { ...all, [currentKey]: { ...prev, tier_by_group: tbg } };
+  try {
+    await api('/api/config', { method: 'POST', body: JSON.stringify({ key_overrides: newAll }) });
+    kovDirty = false; kovmsg('已保存并生效'); loadKey(currentKey);
+  } catch (e) { kovmsg('保存失败：' + e.message, true); }
+}
+
+/* ---------------- key 状态 / 过期 ---------------- */
 
 function toLocalInput(ts) {
   const d = new Date(ts * 1000);
@@ -421,34 +851,6 @@ async function clearExpiry() {
     await api('/api/key/' + encodeURIComponent(currentKey) + '/status', { method: 'POST', body: JSON.stringify({ expires_at: null }) });
     kmsg('已清除过期时间'); loadKey(currentKey);
   } catch (e) { kmsg('操作失败：' + e.message, true); }
-}
-
-/* ---------------- 规则保存 ---------------- */
-
-function msg(text, isErr) {
-  const m = $('msg'); m.textContent = text; m.className = isErr ? 'err' : '';
-}
-function kmsg(text, isErr) {
-  const m = $('kmsg'); m.textContent = text; m.className = isErr ? 'err' : '';
-}
-
-async function saveRules() {
-  let body;
-  try {
-    body = {
-      tiers: JSON.parse($('tiers').value || '{}'),
-      groups: JSON.parse($('groups').value || '{}'),
-      key_overrides: JSON.parse($('key_overrides').value || '{}'),
-      heavy_tools: JSON.parse($('heavy_tools').value || '[]'),
-    };
-  } catch { return msg('JSON 格式错误', true); }
-  try { await api('/api/config', { method: 'POST', body: JSON.stringify(body) }); msg('已保存并生效'); }
-  catch (e) { msg('保存失败：' + e.message, true); }
-}
-
-async function reloadInventory() {
-  try { const r = await api('/api/reload_inventory', { method: 'POST' }); msg(`库存已重载（${r.keys} 个 key）`); load(); }
-  catch (e) { msg('重载失败：' + e.message, true); }
 }
 
 window.addEventListener('resize', () => { if (!currentKey && lastState) drawChart($('chart'), lastState.series_7d || []); });
