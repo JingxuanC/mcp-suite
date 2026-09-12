@@ -155,7 +155,7 @@ def main():
         import sqlite3
         con = sqlite3.connect(f'file:{args.db}?mode=ro', uri=True)
         row = con.execute(
-            "SELECT heavy FROM usage WHERE period = strftime('%Y-%m-%d','now') "
+            "SELECT heavy FROM usage WHERE period = strftime('%Y-%m-%d','now','localtime') "
             'AND key_name = ? AND group_name = ?', (key_name, args.group_alpha)).fetchone()
         con.close()
         day_heavy = row[0] if row else 0
