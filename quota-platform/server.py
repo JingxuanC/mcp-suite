@@ -463,11 +463,27 @@ def _percentile(sorted_vals, q):
 
 # ---------------------------------------------------------------- 判定逻辑
 
-def extract_group(raw_path, cfg):
-    """路径任一段命中 groups 配置即为该组，否则 global。
+TOOL_GROUP_PREFIX = {
+    'astock-data-': 'data',
+    'global-data-': 'data',
+    'factor-miner-': 'alpha',
+    'causal-': 'alpha',
+    'kronos-': 'alpha',
+    'causal-memory-': 'memory',
+}
 
-    mcphub 分组路由形如 /{group}/sse、/{group}/messages；
-    全局路由（/sse、/messages、/api/...）归 global。
+
+def extract_group(raw_path, cfg, tool_name=''):
+    """判定请求所属分组。
+
+    优先级：① 路径任一段命中 groups 配置（mcphub 分组路由形如
+    /{group}/sse、/{group}/messages）；② 工具名前缀映射（cfg.tool_groups，
+    缺省用内置 TOOL_GROUP_PREFIX）；③ 兜底 global。
+
+    为什么要按工具名兜底：接入 URL 由客户端配置决定，实测大量用户走
+    /hub/mcp、/hub/sse 这类不带组名的路径 -> 全部落 global -> 吃 default 档
+    （daily 500）-> 连本该免费的行情查询都被限流。按工具名前缀归类则不受
+    接入路径影响。
     """
     known = cfg.get('groups', {})
     if not known:
@@ -475,6 +491,12 @@ def extract_group(raw_path, cfg):
     for seg in re.findall(r'/([^/?]+)', raw_path.split('?')[0]):
         if seg in known:
             return seg
+    table = cfg.get('tool_groups') or TOOL_GROUP_PREFIX
+    if tool_name:
+        # 最长前缀优先：causal-memory-* 必须先于 causal-* 匹配，否则会被抢走
+        for prefix, g in sorted(table.items(), key=lambda kv: -len(kv[0])):
+            if tool_name.startswith(prefix) and g in known:
+                return g
     return 'global'
 
 
@@ -602,7 +624,8 @@ class DataPlaneHandler(BaseHTTPRequestHandler):
 
         info = self.server.inventory.lookup(token)
         key_name = info['name'] if info else 'anonymous'
-        group = extract_group(self.path, cfg)
+        _countable_pre, _heavy_pre, _tool_pre = classify_request(body, cfg)
+        group = extract_group(self.path, cfg, _tool_pre)
 
         # key 级拦截（先于配额检查，且对所有请求生效，不只 tools/call）
         blocked = key_status_block(cfg, key_name)
