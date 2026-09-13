@@ -58,6 +58,7 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
 - 数据面每次 `tools/call` 转发完成后落一条流水到 `calls` 表（key/分组/工具名/上游耗时/status: ok·http_error·blocked/原因）；WAL 模式单条 INSERT，记录失败只记日志不影响转发。保留期 `log_retention_days`（默认 30 天），启动时 + 每小时清理
 - key 级状态写在 `key_overrides[name]` 里：`disabled: true` → 数据面 403「key 已禁用」；`expires_at: <unix_ts>` 到期 → 403「key 已过期」。两条检查先于配额检查，管理面 `POST /api/key/<name>/status` 热生效
 - 管理 API：`GET /api/key/<name>` 返回该 key 分组用量/近 50 条流水/成功率/p50·p95/生效配额档/状态
+- 全局日志：`GET /api/calls?key=&group=&status=&tool=&since=&before_id=&limit=` 跨 key 查流水（tool 为模糊匹配，before_id 向前翻页，limit 上限 500，返回 has_more）；管理台「调用日志」区块可视化筛选 + 加载更多
 
 ## 在 mcp-suite 中的部署
 
