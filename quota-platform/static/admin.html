@@ -86,6 +86,11 @@
   .keyhead .grow { flex: 1; }
   input.dt { background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: 12px var(--mono); color-scheme: dark; }
   .tbl-wrap { overflow-x: auto; }
+  /* 调用日志筛选条 */
+  .logfilter { display: flex; gap: 8px; align-items: center; padding: 12px 16px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+  .logfilter input, .logfilter select { background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: 12px var(--mono); }
+  .logfilter input { width: 170px; }
+  .logfilter input#lf_tool { width: 140px; }
   #kmsg, #kovmsg { color: var(--ok); font-size: 12px; }
   #kmsg.err, #kovmsg.err { color: var(--bad); }
 </style>
@@ -137,6 +142,29 @@
       <h2>最近拦截</h2>
       <table><thead><tr><th>时间</th><th>key</th><th>分组</th><th>原因</th></tr></thead>
       <tbody id="recent_blocks"></tbody></table>
+    </section>
+
+    <section>
+      <h2>调用日志</h2>
+      <div class="logfilter">
+        <input id="lf_key" list="lf_keys" placeholder="key（留空全部）" spellcheck="false">
+        <datalist id="lf_keys"></datalist>
+        <select id="lf_group"><option value="">全部分组</option></select>
+        <select id="lf_status">
+          <option value="">全部状态</option>
+          <option value="ok">ok</option>
+          <option value="http_error">http_error</option>
+          <option value="blocked">blocked</option>
+        </select>
+        <input id="lf_tool" placeholder="工具名包含…" spellcheck="false">
+        <button class="ghost sml" onclick="loadLogs(true)">查询</button>
+        <span class="muted" id="lf_count"></span>
+      </div>
+      <div class="tbl-wrap">
+      <table><thead><tr><th>时间</th><th>key</th><th>分组</th><th>工具</th><th class="num">延迟 ms</th><th>状态</th><th>原因</th></tr></thead>
+      <tbody id="log_rows"></tbody></table>
+      </div>
+      <div class="btnrow"><button class="ghost sml" id="lf_more" onclick="loadLogs(false)" style="display:none">加载更多</button></div>
     </section>
 
     <div class="grid2">
@@ -381,6 +409,53 @@ async function load() {
       `<td><button class="ghost sml" onclick="boostKey(${js(k.name)})">提额</button></td></tr>`;
   }).join('') || '<tr><td colspan="8" class="muted">库存为空（检查 mcp_settings.json 挂载）</td></tr>';
   if (!cfgDirty) msg('');
+
+  // 日志筛选选项：key 用库存+今日活跃，分组用配置组+用量组
+  const keyOpts = [...new Set([...d.inventory.map(k => k.name), ...d.key_usage.map(u => u.key_name)])].sort();
+  $('lf_keys').innerHTML = keyOpts.map(k => `<option value="${esc(k)}">`).join('');
+  const gCur = $('lf_group').value;
+  const gOpts = [...new Set([...Object.keys(d.config.groups || {}), ...d.group_usage.map(u => u.group_name)])].sort();
+  $('lf_group').innerHTML = '<option value="">全部分组</option>' +
+    gOpts.map(g => `<option value="${esc(g)}" ${g === gCur ? 'selected' : ''}>${esc(g)}</option>`).join('');
+  if (logRows.length <= 100) loadLogs(true);  // 用户翻页深挖时不被自动刷新打断
+}
+
+/* ---------------- 调用日志 ---------------- */
+
+let logRows = [];      // 当前已加载的日志行（翻页累积）
+let logHasMore = false;
+
+function logQuery(beforeId) {
+  const p = new URLSearchParams();
+  const key = $('lf_key').value.trim(), group = $('lf_group').value,
+        status = $('lf_status').value, tool = $('lf_tool').value.trim();
+  if (key) p.set('key', key);
+  if (group) p.set('group', group);
+  if (status) p.set('status', status);
+  if (tool) p.set('tool', tool);
+  if (beforeId) p.set('before_id', beforeId);
+  p.set('limit', '100');
+  return p.toString();
+}
+
+async function loadLogs(reset) {
+  if (currentKey) return;  // 下钻视图有自己的流水表
+  if (reset) logRows = [];
+  const beforeId = reset ? null : (logRows.length ? logRows[logRows.length - 1].id : null);
+  let d;
+  try { d = await api('/api/calls?' + logQuery(beforeId)); }
+  catch (e) { if (reset) $('log_rows').innerHTML = `<tr><td colspan="7" class="muted">加载失败：${esc(e.message)}</td></tr>`; return; }
+  logRows = reset ? d.calls : logRows.concat(d.calls);
+  logHasMore = d.has_more;
+  const stPill = { ok: '<span class="pill ok">ok</span>', http_error: '<span class="pill blocked">http_error</span>', blocked: '<span class="pill blocked">blocked</span>' };
+  $('log_rows').innerHTML = logRows.map(r =>
+    `<tr><td class="muted">${fmtTs(r.ts)}</td><td><a class="klink" onclick="openKey(${js(r.key_name)})">${esc(r.key_name)}</a></td>` +
+    `<td>${esc(r.group_name)}</td><td style="font-family:var(--mono)">${esc(r.tool)}</td>` +
+    `<td class="num">${fmt(r.latency_ms)}</td><td>${stPill[r.status] || esc(r.status)}</td>` +
+    `<td class="muted">${esc(r.reason) || '—'}</td></tr>`).join('') ||
+    '<tr><td colspan="7" class="muted">无匹配日志</td></tr>';
+  $('lf_count').textContent = `已加载 ${logRows.length} 条`;
+  $('lf_more').style.display = logHasMore ? '' : 'none';
 }
 
 /* ---------------- 7 天折线图（Canvas 手绘） ---------------- */
@@ -853,7 +928,10 @@ async function clearExpiry() {
   } catch (e) { kmsg('操作失败：' + e.message, true); }
 }
 
-window.addEventListener('resize', () => { if (!currentKey && lastState) drawChart($('chart'), lastState.series_7d || []); });
+window.addEventListener('resize', () => { if (!currentKey && lastState) drawChart($('chart'), lastState.series_7d || [])); });
+
+['lf_key', 'lf_tool'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') loadLogs(true); }));
+['lf_group', 'lf_status'].forEach(id => $(id).addEventListener('change', () => loadLogs(true)));
 
 load();
 setInterval(load, 15000);

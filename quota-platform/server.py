@@ -29,7 +29,7 @@ import threading
 import time
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 # ---------------------------------------------------------------- 常量
 
@@ -406,14 +406,39 @@ class QuotaStore:
         return sorted(out.values(), key=lambda x: -x['month_calls'])
 
     def recent_calls(self, key_name=None, limit=50):
-        sql = ('SELECT ts, key_name, group_name, tool, latency_ms, status, reason '
+        rows = self.query_calls(key_name=key_name, limit=limit)
+        for r in rows:
+            r.pop('id', None)
+        return rows
+
+    def query_calls(self, key_name=None, group=None, status=None, tool=None,
+                    since=None, before_id=None, limit=200):
+        """全局调用流水查询：filters 均可选，before_id 用于向前翻页（id 倒序）。"""
+        sql = ('SELECT id, ts, key_name, group_name, tool, latency_ms, status, reason '
                'FROM calls')
-        args = []
-        if key_name is not None:
-            sql += ' WHERE key_name = ?'
+        conds, args = [], []
+        if key_name:
+            conds.append('key_name = ?')
             args.append(key_name)
+        if group:
+            conds.append('group_name = ?')
+            args.append(group)
+        if status:
+            conds.append('status = ?')
+            args.append(status)
+        if tool:
+            conds.append('tool LIKE ?')
+            args.append('%' + tool.replace('%', '').replace('_', '') + '%')
+        if since is not None:
+            conds.append('ts >= ?')
+            args.append(int(since))
+        if before_id is not None:
+            conds.append('id < ?')
+            args.append(int(before_id))
+        if conds:
+            sql += ' WHERE ' + ' AND '.join(conds)
         sql += ' ORDER BY id DESC LIMIT ?'
-        args.append(int(limit))
+        args.append(max(1, min(int(limit), 500)))
         with self.lock:
             c = self._conn()
             rows = c.execute(sql, args).fetchall()
@@ -713,10 +738,34 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
                 'today_latency': {'p50': stats['p50'], 'p95': stats['p95']},
                 **self.server.store.state(),
             })
+        if path == '/api/calls':
+            return self._calls_query()
         m = re.fullmatch(r'/api/key/([^/]+)', path)
         if m:
             return self._key_detail(unquote(m.group(1)))
         self._json(404, {'error': 'not_found'})
+
+    def _calls_query(self):
+        qs = parse_qs(urlparse(self.path).query)
+        def one(k):
+            v = qs.get(k)
+            return v[0] if v and v[0] else None
+        def num(k):
+            v = one(k)
+            if v is None:
+                return None
+            try:
+                return int(v)
+            except ValueError:
+                return None
+        rows = self.server.store.query_calls(
+            key_name=one('key'), group=one('group'), status=one('status'),
+            tool=one('tool'), since=num('since'), before_id=num('before_id'),
+            limit=num('limit') or 200)
+        return self._json(200, {
+            'calls': rows,
+            'has_more': len(rows) >= max(1, min(num('limit') or 200, 500)),
+        })
 
     def _key_detail(self, name):
         cfg = self.server.cfg.current()

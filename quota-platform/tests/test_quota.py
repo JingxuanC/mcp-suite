@@ -410,6 +410,46 @@ class QuotaPlatformTest(unittest.TestCase):
         s, _ = self.call(self.admin_port, 'GET', '/api/key/alice')
         self.assertEqual(s, 401)
 
+    def test_calls_query_api(self):
+        self.call(self.data_port, 'POST', '/data/messages', rpc_call('get_price'), token='tok-alice')
+        self.call(self.data_port, 'POST', '/data/messages', rpc_call('get_hist'), token='tok-alice')
+        self.call(self.data_port, 'POST', '/fail/messages', rpc_call('get_price'), token='tok-bob')
+        # 无筛选：全部 3 条，倒序
+        s, raw = self.call(self.admin_port, 'GET', '/api/calls', admin_token='secret-test')
+        self.assertEqual(s, 200)
+        d = json.loads(raw)
+        self.assertEqual(len(d['calls']), 3)
+        self.assertFalse(d['has_more'])
+        self.assertIn('id', d['calls'][0])
+        self.assertGreater(d['calls'][0]['id'], d['calls'][1]['id'])
+        # key / 状态 / 工具模糊 / 分组筛选
+        s, raw = self.call(self.admin_port, 'GET', '/api/calls?key=alice', admin_token='secret-test')
+        self.assertEqual(len(json.loads(raw)['calls']), 2)
+        s, raw = self.call(self.admin_port, 'GET', '/api/calls?status=http_error', admin_token='secret-test')
+        rows = json.loads(raw)['calls']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['key_name'], 'bob')
+        s, raw = self.call(self.admin_port, 'GET', '/api/calls?tool=hist', admin_token='secret-test')
+        rows = json.loads(raw)['calls']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['tool'], 'get_hist')
+        s, raw = self.call(self.admin_port, 'GET', '/api/calls?group=data', admin_token='secret-test')
+        self.assertEqual(len(json.loads(raw)['calls']), 2)
+        # limit + before_id 翻页
+        s, raw = self.call(self.admin_port, 'GET', '/api/calls?limit=2', admin_token='secret-test')
+        d = json.loads(raw)
+        self.assertEqual(len(d['calls']), 2)
+        self.assertTrue(d['has_more'])
+        last_id = d['calls'][-1]['id']
+        s, raw = self.call(self.admin_port, 'GET',
+                           f'/api/calls?limit=2&before_id={last_id}', admin_token='secret-test')
+        d2 = json.loads(raw)
+        self.assertEqual(len(d2['calls']), 1)
+        self.assertLess(d2['calls'][0]['id'], last_id)
+        # 未鉴权
+        s, _ = self.call(self.admin_port, 'GET', '/api/calls')
+        self.assertEqual(s, 401)
+
     # -- key 禁用 / 过期 ----------------------------------------------
 
     def test_key_disable_enable(self):
