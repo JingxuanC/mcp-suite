@@ -125,6 +125,16 @@
   #login-msg.ok { color: var(--ok); }
   #login-help { margin-top: 14px; font-size: 11px; color: var(--muted); line-height: 1.6; display: none; }
   #login-help code { background: #0b0d11; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-family: var(--mono); }
+  /* ── 申请审批表 ── */
+  .reqtable td { font-size: 12px; vertical-align: top; }
+  .reqtable .reqno { font-family: var(--mono); white-space: nowrap; }
+  .reqtable select { background: #0b0d11; color: var(--text); border: 1px solid var(--line);
+                     border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+  .reqtable .ap-grp { display: inline-block; margin: 0 12px 4px 0; white-space: nowrap; font-size: 12px; }
+  .reqtable .ap-brief { color: var(--dim); font-size: 11.5px; margin-top: 4px; line-height: 1.5; max-width: 520px; }
+  .reqtable .ap-box { background: #0b0d11; border: 1px solid var(--ok); border-radius: 6px;
+                      padding: 8px; font-family: var(--mono); font-size: 12px;
+                      word-break: break-all; margin: 6px 0; }
 </style>
 </head>
 <body>
@@ -164,7 +174,38 @@
       <div class="card"><div class="num" id="p95">–</div><div class="lbl">今日延迟 p95</div></div>
       <div class="card"><div class="num" id="keys_active">–</div><div class="lbl">今日活跃 key</div></div>
       <div class="card"><div class="num" id="keys_total">–</div><div class="lbl">库存 key 总数</div></div>
+      <div class="card warn"><div class="num" id="pending_reqs">–</div><div class="lbl">待审批申请</div></div>
+      <div class="card"><div class="num" id="claimable_tokens">–</div><div class="lbl">待领取密钥</div></div>
     </div>
+
+    <!-- ============ API key 申请审批 ============ -->
+    <section id="sec-requests">
+      <h2>API key 申请审批 <span class="pill blocked" id="req_badge" style="display:none"></span></h2>
+      <div class="btnrow" style="margin:0 0 10px">
+        <button class="ghost sml" onclick="loadRequests()">刷新</button>
+        <select id="req_filter" onchange="loadRequests()">
+          <option value="">全部</option>
+          <option value="pending" selected>待审批</option>
+          <option value="approved">已通过</option>
+          <option value="rejected">已拒绝</option>
+        </select>
+        <span class="muted" id="req_hint"></span>
+      </div>
+      <div class="tbl-wrap">
+        <table class="reqtable">
+          <thead><tr>
+            <th>申请单号</th><th>称呼</th><th>联系方式</th><th>申请分组</th>
+            <th>提交时间</th><th>状态</th><th>操作</th>
+          </tr></thead>
+          <tbody id="req_rows"></tbody>
+        </table>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:8px">
+        通过后会自动到 mcphub 建一把<b>收窄到勾选分组</b>的密钥，并把配额档位写入 key_overrides。
+        申请人凭单号在 <a href="apply" target="_blank">申请页</a> 自助领取（只能领一次，取走即从内存抹除）。
+      </p>
+    </section>
+
 
     <section>
       <h2>近 7 天调用量</h2>
@@ -542,6 +583,22 @@ async function load() {
   $('p95').textContent = fmtMs(d.today_latency && d.today_latency.p95);
   $('keys_active').textContent = fmt(d.today_keys);
   $('keys_total').textContent = fmt(d.inventory.length);
+  $('pending_reqs').textContent = fmt(d.pending_requests || 0);
+  $('claimable_tokens').textContent = fmt(d.claimable_tokens || 0);
+  // 没配 mcphub 管理 key 时审批会 502 —— 提前在界面上说清楚，别等点了才知道
+  if (d.mcphub_configured === false) {
+    $('req_hint').innerHTML = '<span style="color:var(--bad)">⚠ 未配置 MCPHUB_ADMIN_KEY，'
+      + '审批无法建 key（在服务器 .env 里补上后重启本服务）</span>';
+  }
+  const badge = $('req_badge');
+  if (d.pending_requests) {
+    badge.textContent = d.pending_requests + ' 条待审批';
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+  // 审批表单打开时不重绘（否则 15s 自动刷新会把勾选状态冲掉）
+  if (!window.AP_OPEN) loadRequests();
 
   drawChart($('chart'), d.series_7d || []);
 
@@ -899,6 +956,147 @@ function backToMain() {
   $('view-key').style.display = 'none';
   $('view-main').style.display = '';
   load();
+}
+
+/* ---------------- API key 申请审批 ----------------
+   通过 = 调 mcphub 建一把「收窄到勾选分组」的 key + 写配额档位。
+   明文 token 只在服务端内存里等申请人领取（取走即抹）；这里「查看密钥」是
+   管理员的人工转发兜底 —— 申请人领不到时可以直接复制给他。 */
+let REQ_CACHE = [];
+let REQ_META = { groups: [], tiers: [], default_tier: 'paid' };
+
+async function loadRequests() {
+  try {
+    const q = $('req_filter').value;
+    const d = await api('/api/requests' + (q ? '?status=' + encodeURIComponent(q) : ''));
+    REQ_CACHE = d.requests || [];
+    REQ_META = { groups: d.apply_groups || [], tiers: d.tiers || [],
+                 default_tier: d.default_tier || 'paid' };
+    if (typeof d.pending_count === 'number') $('pending_reqs').textContent = fmt(d.pending_count);
+    if (typeof d.claimable_count === 'number') $('claimable_tokens').textContent = fmt(d.claimable_count);
+    $('req_hint').textContent = REQ_META.groups.length
+      ? '' : '（未配置 apply_groups，需在 config.json 里指定可申请分组）';
+    renderRequests();
+  } catch (e) {
+    $('req_rows').innerHTML = `<tr><td colspan="7" class="muted">加载失败：${esc(e.message)}</td></tr>`;
+  }
+}
+
+const REQ_STATUS = {
+  pending: ['blocked', '待审批'],
+  approved: ['ok', '已通过'],
+  rejected: ['blocked', '已拒绝'],
+  revoked: ['blocked', '已停用'],
+};
+
+function renderRequests() {
+  const tb = $('req_rows');
+  if (!REQ_CACHE.length) {
+    tb.innerHTML = '<tr><td colspan="7" class="muted">暂无申请</td></tr>';
+    return;
+  }
+  tb.innerHTML = REQ_CACHE.map(r => {
+    const [cls, text] = REQ_STATUS[r.status] || ['', r.status];
+    let act = '';
+    if (r.status === 'pending') {
+      act = `<button class="ghost sml" onclick="startApprove(${r.id},0)">通过</button>
+             <button class="ghost sml" onclick="startReject(${r.id})">拒绝</button>`;
+    } else if (r.status === 'approved') {
+      act = `<button class="ghost sml" onclick="startApprove(${r.id},1)">改发</button>`;
+      if (r.token_pending) {
+        act += ` <button class="ghost sml" onclick="showReqToken(${r.id})">查看密钥</button>`;
+      }
+    }
+    const picked = r.picked_at ? ` <span class="muted">已领取</span>` : '';
+    return `<tr id="req-${r.id}">
+      <td class="reqno">${esc(r.req_no)}</td>
+      <td>${esc(r.name)}</td>
+      <td>${esc(r.contact || '—')}</td>
+      <td>${(r.granted_groups && r.granted_groups.length ? r.granted_groups : r.want_groups || [])
+              .map(g => `<span class="pill">${esc(g)}</span>`).join(' ') || '—'}</td>
+      <td class="muted">${fmtTs(r.created_at)}</td>
+      <td><span class="pill ${cls}">${esc(text)}</span>${picked}</td>
+      <td>${act}</td>
+    </tr>
+    <tr id="req-brief-${r.id}"><td colspan="7" class="ap-brief">
+      ${r.purpose ? '用途：' + esc(r.purpose) : '（未填用途）'}
+      ${r.volume ? ' · 预计量：' + esc(r.volume) : ''}
+      ${r.mc_key_name ? ' · key 名：<span class="mono">' + esc(r.mc_key_name) + '</span>' : ''}
+      ${r.reject_reason ? ' · 拒绝理由：' + esc(r.reject_reason) : ''}
+    </td></tr>`;
+  }).join('');
+}
+
+/* isReissue: 0=通过 1=改发 */
+function startApprove(id, isReissue) {
+  const r = REQ_CACHE.find(x => x.id === id);
+  if (!r) return;
+  if (!REQ_META.groups.length) return alert('服务端未配置 apply_groups，无法审批');
+  const pre = (r.granted_groups && r.granted_groups.length ? r.granted_groups : r.want_groups) || [];
+  const boxes = REQ_META.groups.map(g =>
+    `<label class="ap-grp"><input type="checkbox" value="${esc(g)}"
+       ${pre.includes(g) ? 'checked' : ''}/> ${esc(g)}</label>`).join('');
+  const tiers = REQ_META.tiers.map(t =>
+    `<option value="${esc(t)}" ${t === REQ_META.default_tier ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  window.AP_OPEN = true;
+  $('req-' + id).innerHTML = `<td colspan="7">
+    <div><b>${isReissue ? '改发' : '通过'}申请</b> ${esc(r.req_no)} · ${esc(r.name)}
+      ${isReissue ? '<span class="muted">（会新建一把密钥并停用旧的，分组/档位可改）</span>' : ''}</div>
+    <div style="margin:8px 0"><span class="muted">授权分组：</span>${boxes}</div>
+    <div>
+      <span class="muted">配额档位：</span>
+      <select id="ap-tier">${tiers}</select>
+      <button onclick="submitApprove(${id},${isReissue})">确认${isReissue ? '改发' : '通过'}</button>
+      <button class="ghost" onclick="window.AP_OPEN=false;renderRequests()">取消</button>
+      <span class="muted" id="ap-msg"></span>
+    </div></td>`;
+}
+
+async function submitApprove(id, isReissue) {
+  const groups = [...document.querySelectorAll('#req-' + id + ' input[type=checkbox]:checked')]
+    .map(i => i.value);
+  if (!groups.length) return apMsg(id, '请至少勾选一个分组', true);
+  const tier = $('ap-tier').value;
+  apMsg(id, '正在调 mcphub 建 key…');
+  try {
+    const d = await api(`/api/requests/${id}/${isReissue ? 'reissue' : 'approve'}`,
+      { method: 'POST', body: JSON.stringify({ groups, tier }) });
+    window.AP_OPEN = false;
+    let note = `已创建 key「${d.key_name}」，申请人可凭单号领取。`;
+    if (d.old_key_note) note += ' ' + d.old_key_note;
+    if (d.warning) alert(note + '\n\n⚠ ' + d.warning); else note && console.log(note);
+    await loadRequests();
+    load();
+  } catch (e) {
+    apMsg(id, '失败：' + e.message, true);
+  }
+}
+
+function apMsg(id, text, isErr) {
+  const el = $('ap-msg');
+  if (el) { el.textContent = text || ''; el.style.color = isErr ? 'var(--bad)' : ''; }
+}
+
+function startReject(id) {
+  const r = REQ_CACHE.find(x => x.id === id);
+  if (!r) return;
+  const reason = window.prompt(`拒绝申请 ${r.req_no}（${r.name}）\n请填写理由，申请人会看到：`, '');
+  if (reason === null) return;
+  api(`/api/requests/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) })
+    .then(() => loadRequests())
+    .catch(e => alert('拒绝失败：' + e.message));
+}
+
+async function showReqToken(id) {
+  try {
+    const d = await api(`/api/requests/${id}/token`);
+    const urls = (d.access.per_group || []).map(g => g.group + ' → ' + g.url).join('\n');
+    window.prompt(`key「${d.key_name}」的密钥（申请人尚未领取）\n\n` +
+      `复制后发给申请人；他自助领取后这里就不再可见。\n\n${urls}`,
+      d.token);
+  } catch (e) {
+    alert('取密钥失败：' + e.message);
+  }
 }
 
 async function loadKey(name) {

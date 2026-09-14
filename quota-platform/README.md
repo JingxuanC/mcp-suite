@@ -35,7 +35,7 @@ python3 scripts/set_admin_password.py --list             # 看有哪些账号
 python3 scripts/set_admin_password.py --username ops --disable
 ```
 
-跑测试：`python -m unittest discover -s tests -v`（84 个用例）
+跑测试：`python -m unittest discover -s tests -v`（106 个用例，另见 `scripts/e2e_apply_flow.py`）
 
 ## 管控模型
 
@@ -54,6 +54,65 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
 ## 管理面（:3300）
 
 生产环境经 nginx `https://causal-memory.com/quota/` 访问（前缀由 nginx 剥离）。**用账号 + 口令登录**，登录后：
+
+### API key 自助申请 / 审批
+
+新客户不必再让你去 mcphub 手点建 key 再复制分发。链路：
+
+```
+申请人（公网）                    配额平台                          mcphub
+ /quota/apply 填表  ──POST──▶  key_requests(pending)
+                                      │
+ 你在管理台「申请审批」 ──▶ 通过 ─────┼──POST /hub/api/auth/keys──▶ 建 key（收窄到勾选分组）
+                                      │◀──── 明文 token（只出现一次）
+                            key_overrides 写配额档位
+                                      │
+ 申请人凭单号 ──▶ 领取页 ──▶ 显示 token + 接入片段，随即抹除
+```
+
+| 端点 | 鉴权 | 说明 |
+|---|---|---|
+| `GET /apply` | 匿名 | 申请页（公开） |
+| `GET /api/apply/meta` | 匿名 | 可选分组等元信息 |
+| `POST /api/apply` | 匿名 | 提交申请 → 返回申请单号 `REQ-XXXXXXXX`；按 IP 限流 |
+| `GET /api/apply/<单号>` | 匿名 | 查状态（**不返回密钥**） |
+| `POST /api/apply/<单号>/pickup` | 匿名 | 领取密钥 → 返回后**立即从内存抹除** |
+| `GET /api/requests` | 管理 | 申请列表 + 待办数 |
+| `POST /api/requests/<id>/approve` | 管理 | 通过：建 key + 写档位（`groups`、`tier`） |
+| `POST /api/requests/<id>/reject` | 管理 | 拒绝（`reason` 会展示给申请人） |
+| `POST /api/requests/<id>/reissue` | 管理 | 改发：建新 key + 停用旧 key |
+| `GET /api/requests/<id>/token` | 管理 | 兜底：查看待领取的密钥，人工转发 |
+
+**两个刻意的设计**
+
+1. **明文 token 不落库**。mcphub 建 key 的响应里 token 只出现一次（它自己只存掩码），
+   所以必须当场接住。本平台把它放在**内存**里等领取，领走即删 —— 夜间 `quota.db`
+   备份因此永远不含可用密钥。代价：等待领取期间若服务重启，token 丢失，管理台
+   点「改发」即可（建新 key + 停用旧 key）。
+2. **收窄授权**。新 key 一律 `accessType=groups` + `allowedGroups=勾选的分组`
+   （mcphub 的 `sseService` 对这类 key 是 fail-closed）。因此客户端**必须走带组名的
+   地址** `/hub/mcp/<组名>`；不带组名的全局路由 `/hub/mcp` 会被 mcphub 拒绝。
+   领取页会把完整接入片段（每个组的地址 + 请求头 + Claude Desktop 示例）写清楚。
+
+**前置配置**
+
+```jsonc
+{
+  "mcphub_api_base": "http://127.0.0.1:3100/hub/api",  // 注意必须带 /api
+  "apply_groups": ["data", "alpha", "memory"],          // 允许申请的分组（须与 mcphub groups 同名）
+  "apply_default_tier": "paid",
+  "apply_rate_hour": 3, "apply_rate_day": 10,           // 同 IP 申请频率上限
+  "apply_pickup_hours": 168                             // 审批后未领取则作废
+}
+```
+
+`mcphub_admin_key` 用**环境变量 `MCPHUB_ADMIN_KEY`** 注入（compose 从 `.env` 读），
+不要写进 `config.json`。它需要是一把 mcphub 的 **system + all-access** key
+（`auth.js` 的 `validateBearerAuth` 只放行这种 key 访问管理路由）；
+建议专门建一把 `quota-platform-admin` 而不是复用 `admin-all`，便于单独吊销。
+
+已知坑：mcphub 管理 API 前缀**必须带 `/api`**。`/hub/auth/keys` 会落到它的 SPA 首页
+并返回 **200 + HTML**（看起来像成功）；本平台会识别成 `mcphub 返回的不是 JSON`。
 
 ### 鉴权
 

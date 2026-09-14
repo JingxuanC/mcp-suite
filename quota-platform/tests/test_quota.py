@@ -796,5 +796,352 @@ class AdminAuthTest(QuotaPlatformTest):
 
 
 
+
+# ---------------------------------------------------------------- API key 自助申请 / 审批
+
+class MockMcphubKeys(BaseHTTPRequestHandler):
+    """只实现建/查/停用 key 的 mcphub 管理 API。"""
+
+    created = []
+    calls = []
+
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _deny(self):
+        if 'Bearer good-admin-key' not in self.headers.get('Authorization', ''):
+            self._send(401, {'success': False, 'message': 'unauthorized'})
+            return True
+        return False
+
+    def do_GET(self):
+        MockMcphubKeys.calls.append(('GET', self.path))
+        if self.path != '/hub/api/auth/keys':
+            return self._send(404, {'success': False, 'message': 'not found'})
+        if self._deny():
+            return
+        return self._send(200, {'success': True, 'data': [
+            {'id': k['id'], 'name': k['name'], 'token': k['token'][:8] + '...****'}
+            for k in MockMcphubKeys.created]})
+
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length') or 0)
+        payload = json.loads(self.rfile.read(n) or b'{}')
+        MockMcphubKeys.calls.append(('POST', self.path, payload))
+        if self.path != '/hub/api/auth/keys':
+            return self._send(404, {'success': False, 'message': 'not found'})
+        if self._deny():
+            return
+        kid = 'kid-%d' % (len(MockMcphubKeys.created) + 1)
+        token = 'mcphub_' + os.urandom(32).hex()
+        MockMcphubKeys.created.append({'id': kid, 'name': payload.get('name'),
+                                       'token': token, 'groups': payload.get('allowedGroups')})
+        return self._send(201, {'success': True,
+                                'data': {'id': kid, 'name': payload.get('name'), 'token': token},
+                                'message': 'The token is only shown once.'})
+
+    def do_PUT(self):
+        n = int(self.headers.get('Content-Length') or 0)
+        payload = json.loads(self.rfile.read(n) or b'{}')
+        MockMcphubKeys.calls.append(('PUT', self.path, payload))
+        if self._deny():
+            return
+        return self._send(200, {'success': True, 'data': {'enabled': payload.get('enabled')}})
+
+
+class KeyRequestFlowTest(unittest.TestCase):
+    """申请 → 审批（建 key）→ 领取（取完即抹），以及限流/脱敏/错误语义。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        MockMcphubKeys.created = []
+        MockMcphubKeys.calls = []
+        cls.mock = ThreadingHTTPServer(('127.0.0.1', 0), MockMcphubKeys)
+        threading.Thread(target=cls.mock.serve_forever, daemon=True).start()
+        cls.mock_port = cls.mock.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.mock.shutdown()
+        cls.mock.server_close()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        MockMcphubKeys.created = []
+        MockMcphubKeys.calls = []
+        self.root = tempfile.mkdtemp(dir=self.tmp.name)
+        self.cfg_path = os.path.join(self.root, 'config.json')
+        with open(self.cfg_path, 'w') as f:
+            json.dump({
+                'upstream': 'http://127.0.0.1:1',
+                'admin_token': 'legacy-ok',
+                'mcp_settings_path': os.path.join(self.root, 'none.json'),
+                'mcphub_api_base': 'http://127.0.0.1:%d/hub/api' % self.mock_port,
+                'groups': {'data': {'tier': 'free'}, 'alpha': {'tier': 'paid'},
+                           'memory': {'tier': 'paid'}},
+                'tiers': {'free': {'daily': 1000, 'monthly': 9999, 'heavy_daily': None},
+                          'paid': {'daily': 200, 'monthly': 4000, 'heavy_daily': 20}},
+                'apply_groups': ['data', 'alpha', 'memory'],
+                'apply_rate_hour': 2, 'apply_rate_day': 5,
+            }, f)
+        self.cfg = qp.Config(self.cfg_path)
+        self.store = qp.QuotaStore(os.path.join(self.root, 'q.db'))
+        self.inv = qp.KeyInventory(self.cfg.current()['mcp_settings_path'])
+        self.srv = ThreadingHTTPServer(('127.0.0.1', 0), qp.AdminPlaneHandler)
+        self.srv.cfg, self.srv.store, self.srv.inventory = self.cfg, self.store, self.inv
+        self.srv.mcphub = qp.McphubAdmin(self.cfg.current()['mcphub_api_base'],
+                                         'good-admin-key')
+        self.srv.pending = qp.PendingTokens(ttl_seconds=3600)
+        self.srv.apply_limiter = qp.ApplyRateLimiter(per_hour=2, per_day=5)
+        self.srv.users = qp.AdminUsers(os.path.join(self.root, 'u.json'))
+        self.srv.sessions = qp.SessionStore()
+        self.srv.throttle = qp.LoginThrottle()
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.port = self.srv.server_address[1]
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def call(self, method, path, body=None, headers=None):
+        c = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        hdrs = {'Content-Type': 'application/json'}
+        hdrs.update(headers or {})
+        c.request(method, path, body=json.dumps(body) if body is not None else None,
+                  headers=hdrs)
+        r = c.getresponse()
+        raw = r.read()
+        c.close()
+        try:
+            return r.status, json.loads(raw or b'{}')
+        except json.JSONDecodeError:
+            return r.status, {'_raw': raw[:2000].decode('utf-8', 'replace')}
+
+    ADMIN = {'X-Admin-Token': 'legacy-ok'}
+
+    # ── 单号与内存 token ──
+
+    def test_request_no_format_and_uniqueness(self):
+        nos = {qp.new_request_no() for _ in range(500)}
+        self.assertEqual(len(nos), 500)
+        for n in list(nos)[:20]:
+            self.assertRegex(n, r'^REQ-[A-HJ-NP-Z2-9]{8}$')  # 无 I/O/0/1
+
+    def test_pending_tokens_pop_is_one_shot(self):
+        p = qp.PendingTokens(ttl_seconds=60)
+        p.put('REQ-AAAAAAAA', 'mcphub_secret', 'k', ['data'])
+        self.assertEqual(p.peek('REQ-AAAAAAAA')['key_name'], 'k')   # peek 不取走
+        self.assertEqual(p.pop('REQ-AAAAAAAA')['token'], 'mcphub_secret')
+        self.assertIsNone(p.pop('REQ-AAAAAAAA'))                    # 取完即抹
+        self.assertEqual(len(p.pending()), 0)
+
+    def test_pending_tokens_ttl(self):
+        p = qp.PendingTokens(ttl_seconds=0)
+        p.put('REQ-BBBBBBBB', 't', 'k', ['data'])
+        time.sleep(0.01)
+        self.assertIsNone(p.peek('REQ-BBBBBBBB'))
+
+    def test_pending_listing_hides_token(self):
+        p = qp.PendingTokens()
+        p.put('REQ-CCCCCCCC', 'mcphub_secret', 'k', ['data'])
+        self.assertNotIn('token', p.pending()['REQ-CCCCCCCC'])
+
+    # ── 限流 ──
+
+    def test_rate_limiter_hour_and_day(self):
+        r = qp.ApplyRateLimiter(per_hour=2, per_day=3)
+        self.assertEqual(r.check('1.1.1.1'), 0)
+        r.record('1.1.1.1')
+        r.record('1.1.1.1')
+        self.assertGreater(r.check('1.1.1.1'), 0)      # 超每小时
+        self.assertEqual(r.check('2.2.2.2'), 0)        # 别的 IP 不受影响
+
+    def test_rate_limiter_day_cap(self):
+        r = qp.ApplyRateLimiter(per_hour=100, per_day=2)
+        r.record('3.3.3.3')
+        r.record('3.3.3.3')
+        self.assertGreater(r.check('3.3.3.3'), 0)
+
+    # ── mcphub 客户端错误语义 ──
+
+    def test_mcphub_requires_admin_key(self):
+        with self.assertRaises(qp.MCPhubError):
+            qp.McphubAdmin('http://127.0.0.1:1/hub/api', '').list_keys()
+
+    def test_mcphub_401_is_reported(self):
+        bad = qp.McphubAdmin(self.cfg.current()['mcphub_api_base'], 'wrong')
+        with self.assertRaises(qp.MCPhubError) as cm:
+            bad.list_keys()
+        self.assertIn('401', str(cm.exception))
+
+    def test_mcphub_html_instead_of_json_is_caught(self):
+        """API 前缀写错时 mcphub 返回 SPA 的 HTML + 200，必须识别成错误而不是当成功。"""
+        class Spa(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                body = b'<!DOCTYPE html><html></html>'
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        spa = ThreadingHTTPServer(('127.0.0.1', 0), Spa)
+        threading.Thread(target=spa.serve_forever, daemon=True).start()
+        try:
+            client = qp.McphubAdmin('http://127.0.0.1:%d' % spa.server_address[1], 'k')
+            with self.assertRaises(qp.MCPhubError) as cm:
+                client.list_keys()
+            self.assertIn('不是 JSON', str(cm.exception))
+        finally:
+            spa.shutdown()
+            spa.server_close()
+
+    def test_create_key_uses_group_scoped_access(self):
+        kid, name, token = qp.McphubAdmin(
+            self.cfg.current()['mcphub_api_base'], 'good-admin-key'
+        ).create_key('测试客户-ab12', ['data', 'alpha'])
+        payload = [c for c in MockMcphubKeys.calls if c[0] == 'POST'][-1][2]
+        self.assertEqual(payload['accessType'], 'groups')     # 收窄，不是 all
+        self.assertEqual(payload['allowedGroups'], ['data', 'alpha'])
+        self.assertEqual(payload['kind'], 'system')
+        self.assertTrue(token.startswith('mcphub_'))
+        self.assertTrue(kid)
+
+    # ── HTTP 流程 ──
+
+    def test_apply_meta_is_public(self):
+        s, b = self.call('GET', '/api/apply/meta')
+        self.assertEqual(s, 200)
+        self.assertEqual([g['name'] for g in b['groups']], ['data', 'alpha', 'memory'])
+
+    def test_apply_validation(self):
+        s, b = self.call('POST', '/api/apply', {})
+        self.assertEqual((s, b['error']), (400, 'name_required'))
+        s, b = self.call('POST', '/api/apply', {'name': 'x'})
+        self.assertEqual((s, b['error']), (400, 'contact_required'))
+        s, b = self.call('POST', '/api/apply', {'name': 'x', 'contact': 'y'})
+        self.assertEqual((s, b['error']), (400, 'groups_required'))
+        s, b = self.call('POST', '/api/apply', {'name': 'x', 'contact': 'y', 'groups': ['nope']})
+        self.assertEqual((s, b['error']), (400, 'groups_required'))
+
+    def test_admin_endpoints_require_auth(self):
+        for method, path in (('GET', '/api/requests'),
+                             ('GET', '/api/requests/1/token'),
+                             ('POST', '/api/requests/1/approve')):
+            s, _ = self.call(method, path, {} if method == 'POST' else None)
+            self.assertEqual(s, 401, '%s %s 应当 401' % (method, path))
+
+    def _apply(self, name='客户甲', groups=('data', 'alpha')):
+        s, b = self.call('POST', '/api/apply', {'name': name, 'contact': 'a@b.c',
+                                                'purpose': '测试', 'groups': list(groups)})
+        self.assertEqual(s, 200)
+        return b['req_no'], b['id']
+
+    def test_full_flow_approve_pickup_wipe(self):
+        req_no, rid = self._apply()
+        s, b = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(b['status'], 'pending')
+        self.assertNotIn('token', b)
+
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid,
+                         {'groups': ['data'], 'tier': 'free'}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        key_name = b['key_name']
+        # 收窄授权 + 档位写入
+        post = [c for c in MockMcphubKeys.calls if c[0] == 'POST'][-1][2]
+        self.assertEqual(post['allowedGroups'], ['data'])
+        self.assertEqual(
+            self.cfg.current()['key_overrides'][key_name]['tier_by_group']['data']['daily'], 1000)
+
+        s, b = self.call('GET', '/api/apply/' + req_no)
+        self.assertTrue(b['claimable'])
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
+        self.assertEqual(s, 200)
+        token = b['token']
+        self.assertTrue(token.startswith('mcphub_'))
+        self.assertTrue(b['access']['per_group'][0]['url'].endswith('/hub/mcp/data'))
+        self.assertIn('必须使用带组名的地址', b['access']['note'])
+
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
+        self.assertEqual((s, b['error']), (410, 'already_picked_or_expired'))
+        self.assertIsNone(self.srv.pending.peek(req_no))
+        s, b = self.call('GET', '/api/requests/%d/token' % rid, None, self.ADMIN)
+        self.assertEqual(s, 404)
+
+    def test_approve_rejects_unknown_group_and_tier(self):
+        req_no, rid = self._apply()
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid,
+                         {'groups': ['nope']}, self.ADMIN)
+        self.assertEqual(s, 400)
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid,
+                         {'groups': ['data'], 'tier': 'nope'}, self.ADMIN)
+        self.assertEqual((s, b['error']), (400, 'unknown_tier'))
+
+    def test_approve_twice_is_conflict(self):
+        req_no, rid = self._apply()
+        self.call('POST', '/api/requests/%d/approve' % rid, {'groups': ['data']}, self.ADMIN)
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid, {'groups': ['data']}, self.ADMIN)
+        self.assertEqual((s, b['error']), (409, 'already_approved'))
+
+    def test_reissue_disables_old_key_and_reissues(self):
+        req_no, rid = self._apply()
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid,
+                         {'groups': ['data']}, self.ADMIN)
+        old = b['key_name']
+        s, b = self.call('POST', '/api/requests/%d/reissue' % rid,
+                         {'groups': ['alpha'], 'tier': 'paid'}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        self.assertNotEqual(b['key_name'], old)
+        self.assertTrue(any(c[0] == 'PUT' and c[2].get('enabled') is False
+                            for c in MockMcphubKeys.calls), '旧 key 应被停用')
+        s, b = self.call('GET', '/api/requests/%d/token' % rid, None, self.ADMIN)
+        self.assertEqual(s, 200)
+
+    def test_reject_flow(self):
+        req_no, rid = self._apply()
+        s, b = self.call('POST', '/api/requests/%d/reject' % rid,
+                         {'reason': '用途不明确'}, self.ADMIN)
+        self.assertEqual(s, 200)
+        s, b = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(b['status'], 'rejected')
+        self.assertEqual(b['reject_reason'], '用途不明确')
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
+        self.assertEqual((s, b['error']), (409, 'not_approved'))
+
+    def test_pickup_before_approval_is_rejected(self):
+        req_no, _ = self._apply()
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
+        self.assertEqual((s, b['error']), (409, 'not_approved'))
+
+    def test_unknown_request_no_is_404(self):
+        s, b = self.call('GET', '/api/apply/REQ-ZZZZZZZZ')
+        self.assertEqual((s, b['error']), (404, 'not_found'))
+
+    def test_secrets_are_masked_in_state(self):
+        s, b = self.call('GET', '/api/state', None, self.ADMIN)
+        self.assertEqual(s, 200)
+        self.assertNotIn('admin_token', b['config'])
+        self.assertNotIn('mcphub_admin_key', b['config'])
+        self.assertIn('pending_requests', b)
+
+    def test_apply_page_is_served(self):
+        s, b = self.call('GET', '/apply')
+        self.assertEqual(s, 200)   # HTML 页，解析失败会落到 _raw
+        self.assertIn('_raw', b)
+        self.assertIn('申请 API Key', b['_raw'])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -34,7 +34,9 @@ import threading
 import time
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------- 常量
 
@@ -72,6 +74,31 @@ CREATE TABLE IF NOT EXISTS calls (
 );
 CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);
 CREATE INDEX IF NOT EXISTS idx_calls_key_ts ON calls(key_name, ts);
+
+-- ── API key 自助申请 / 审批 ────────────────────────────────────────────
+-- 明文 token **不落这张表**：审批通过后 token 只存在内存里等待领取，领取即抹
+-- （见 PendingTokens）。这样夜间 quota.db 备份永远不含可用密钥。
+CREATE TABLE IF NOT EXISTS key_requests (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  req_no         TEXT NOT NULL UNIQUE,      -- 申请人凭此领取（随机、不可枚举）
+  name           TEXT NOT NULL,             -- 申请人/团队称呼
+  contact        TEXT NOT NULL DEFAULT '',
+  purpose        TEXT NOT NULL DEFAULT '',
+  want_groups    TEXT NOT NULL DEFAULT '[]',-- 申请人勾选的分组（JSON 数组）
+  volume         TEXT NOT NULL DEFAULT '',
+  status         TEXT NOT NULL,             -- pending/approved/rejected/revoked
+  created_at     INTEGER NOT NULL,
+  decided_at     INTEGER,
+  decided_by     TEXT NOT NULL DEFAULT '',
+  reject_reason  TEXT NOT NULL DEFAULT '',
+  mc_key_id      TEXT NOT NULL DEFAULT '',  -- mcphub 里的 key id
+  mc_key_name    TEXT NOT NULL DEFAULT '',  -- mcphub 里的 key name（也是配额 key_name）
+  granted_groups TEXT NOT NULL DEFAULT '[]',
+  picked_at      INTEGER,                   -- 领取时间（NULL = 未领取）
+  client_ip      TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_keyreq_status ON key_requests(status);
+CREATE INDEX IF NOT EXISTS idx_keyreq_created ON key_requests(created_at);
 """
 
 DEFAULT_CONFIG = {
@@ -85,6 +112,14 @@ DEFAULT_CONFIG = {
     'admin_session_idle': 1800,                # 空闲超时（秒，默认 30min）
     'admin_login_max_fails': 5,                # 连续失败多少次锁 IP/账号
     'admin_login_lock_seconds': 900,           # 锁定时长（秒）
+    # ── API key 自助申请 / 审批 ──
+    'mcphub_api_base': 'http://127.0.0.1:3100/hub/api',  # mcphub 管理 API 前缀
+    'mcphub_admin_key': '',                    # 建 key 用的 system+all key（用 MCPHUB_ADMIN_KEY 注入）
+    'apply_groups': ['data', 'alpha', 'memory'],  # 允许申请的分组（须与 mcphub groups 同名）
+    'apply_default_tier': 'paid',              # 审批时预选的档位
+    'apply_rate_hour': 3,                      # 同 IP 每小时申请上限
+    'apply_rate_day': 10,                      # 同 IP 每天申请上限
+    'apply_pickup_hours': 168,                 # 审批通过后未领取则作废（默认 7 天）
     'mcp_settings_path': '/mnt/mcp_settings.json',  # 只读挂载 mcphub 的配置文件
     'log_retention_days': 30,                  # 调用流水保留天数（启动时 + 每小时清理）
     'groups': {                                # 路由路径段 → 套餐档
@@ -133,6 +168,9 @@ class Config:
         env_token = os.environ.get('QUOTA_ADMIN_TOKEN')
         if env_token:
             merged['admin_token'] = env_token  # 环境变量优先（docker-compose 注入 .env）
+        env_mc = os.environ.get('MCPHUB_ADMIN_KEY')
+        if env_mc:
+            merged['mcphub_admin_key'] = env_mc  # 同上；永不落 config.json
         with self._lock:
             self.data = merged
             self._mtime = mtime
@@ -454,6 +492,201 @@ class LoginThrottle:
 _DUMMY_HASH = hash_password('dummy-password-for-timing')
 
 
+# ---------------------------------------------------------------- API key 自助申请 / 审批
+#
+# 痛点：新客户要 key，得人工去 mcphub 界面建一把、再复制分发，既慢又容易发错。
+# 这条流水线拆成 申请人填表 → 管理员审批 → 申请人自助领取：
+#
+#   POST /api/apply                 （匿名，IP 限流）→ 返回申请单号 REQ-XXXXXXXX
+#   POST /api/requests/<id>/approve （管理台）→ 调 mcphub 管理 API 建 key，收窄到勾选分组
+#   POST /api/apply/<单号>/pickup   （匿名，凭单号）→ 返回明文 token，**随即抹除**
+#
+# 两个刻意的设计：
+#
+# 1. **明文 token 不落库**。mcphub 建 key 的响应里 token 只出现一次（它自己只存哈希/
+#    掩码），所以必须当场接住。我们把它放进内存的 PendingTokens 等领取，领走即删 ——
+#    夜间的 quota.db 备份因此永远不含可用密钥。代价：等待领取期间若服务重启，token 丢失，
+#    管理台可一键「改发」（建新 key + 停用旧 key），比让密钥进备份划算。
+# 2. **收窄授权**。新 key 一律 accessType=groups + allowedGroups=勾选的分组。于是客户端
+#    必须走带组名的路径 /hub/mcp/<组>；不带组名的全局路由对这类 key 会被 mcphub 直接
+#    拒绝（sseService.js 里 fail-closed，已实测确认）。领取页会把完整接入片段写清楚。
+#
+# 已知坑（实测）：mcphub 管理 API 前缀必须带 /api —— `/hub/auth/keys` 会落到 SPA 首页
+# 并返回 **200 + HTML**（假成功），只有 `/hub/api/auth/keys` 才是真接口。
+
+
+class MCPhubError(Exception):
+    """mcphub 管理 API 调用失败（消息可直接展示给管理员）。"""
+
+
+class McphubAdmin:
+    """mcphub 管理 API 的最小客户端（纯标准库）。
+
+    鉴权：``Authorization: Bearer <system+all 的 key>``（auth.js 里 validateBearerAuth
+    要求 kind=system 且 accessType=all 才放行管理路由）。
+    """
+
+    def __init__(self, base, admin_key, timeout=15):
+        self.base = (base or '').rstrip('/')
+        self.admin_key = admin_key or ''
+        self.timeout = timeout
+
+    def _call(self, method, path, payload=None):
+        if not self.admin_key:
+            raise MCPhubError('未配置 mcphub 管理 key（用环境变量 MCPHUB_ADMIN_KEY 注入）')
+        data = json.dumps(payload).encode('utf-8') if payload is not None else None
+        req = Request(self.base + path, data=data, method=method, headers={
+            'Authorization': 'Bearer ' + self.admin_key,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        })
+        try:
+            with urlopen(req, timeout=self.timeout) as r:
+                raw = r.read().decode('utf-8', 'replace')
+        except HTTPError as e:
+            detail = ''
+            try:
+                detail = e.read().decode('utf-8', 'replace')[:300]
+            except Exception:
+                pass
+            raise MCPhubError('mcphub HTTP %s: %s' % (e.code, detail or e.reason))
+        except (URLError, OSError) as e:
+            raise MCPhubError('连不上 mcphub（%s）: %s' % (self.base, e))
+        if not raw.lstrip().startswith(('{', '[')):
+            raise MCPhubError('mcphub 返回的不是 JSON（API 前缀写错？必须形如 /hub/api）：%s'
+                              % raw[:80])
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise MCPhubError('mcphub 返回非法 JSON: %s' % e)
+        if isinstance(obj, dict) and obj.get('success') is False:
+            raise MCPhubError(str(obj.get('message') or 'mcphub 返回 success=false'))
+        return obj
+
+    def list_keys(self):
+        """→ [{id, name, kind, accessType, allowedGroups, token(掩码)}…]"""
+        return (self._call('GET', '/auth/keys') or {}).get('data') or []
+
+    def create_key(self, name, groups, enabled=True):
+        """建一把收窄到 ``groups`` 的 key → ``(key_id, key_name, token)``。
+
+        ``accessType='groups'`` 是 mcphub 的按组授权：key 只能访问 allowedGroups 命中的
+        组，且**无组名的全局路由一律拒绝**（这正是我们要的最小权限）。
+        """
+        obj = self._call('POST', '/auth/keys', {
+            'name': name, 'kind': 'system', 'accessType': 'groups',
+            'allowedGroups': list(groups), 'allowedServers': [], 'enabled': bool(enabled),
+        })
+        data = obj.get('data') or {}
+        token = data.get('token') or ''
+        if not token:
+            raise MCPhubError('mcphub 未返回明文 token（响应缺少 data.token）')
+        return data.get('id') or '', data.get('name') or name, token
+
+    def set_enabled(self, key_id, enabled):
+        return self._call('PUT', '/auth/keys/' + quote(str(key_id), safe=''),
+                          {'enabled': bool(enabled)})
+
+    def delete_key(self, key_id):
+        return self._call('DELETE', '/auth/keys/' + quote(str(key_id), safe=''))
+
+
+class PendingTokens:
+    """已审批、待领取的明文 token —— **只在内存**，不落库（见上方设计说明）。
+
+    :meth:`pop` 是唯一的领取出口：取走即删。``ttl`` 到期未领取自动清掉。
+    """
+
+    def __init__(self, ttl_seconds=604800):
+        self.ttl = int(ttl_seconds)
+        self._lock = threading.Lock()
+        self._d = {}
+
+    def put(self, req_no, token, key_name, groups):
+        with self._lock:
+            self._gc()
+            self._d[req_no] = {'token': token, 'key_name': key_name,
+                               'groups': list(groups), 'created_at': time.time()}
+
+    def pop(self, req_no):
+        """领取：返回并立即删除（取完即抹）。→ dict 或 None。"""
+        with self._lock:
+            self._gc()
+            return self._d.pop(req_no, None)
+
+    def peek(self, req_no):
+        with self._lock:
+            self._gc()
+            it = self._d.get(req_no)
+            return dict(it) if it else None
+
+    def drop(self, req_no):
+        with self._lock:
+            return self._d.pop(req_no, None) is not None
+
+    def pending(self):
+        """→ {req_no: {key_name, groups, age_sec}}（不含 token 本体）。"""
+        with self._lock:
+            self._gc()
+            now = time.time()
+            return {k: {'key_name': v['key_name'], 'groups': v['groups'],
+                        'age_sec': int(now - v['created_at'])}
+                    for k, v in self._d.items()}
+
+    def _gc(self):
+        now = time.time()
+        for k in [k for k, v in self._d.items() if now - v['created_at'] > self.ttl]:
+            self._d.pop(k, None)
+
+
+def new_request_no():
+    """申请单号：``REQ-`` + 8 位无歧义字符（32 字母表 ≈ 40 bit，不可枚举）。"""
+    alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'  # 去掉 I/O/0/1
+    return 'REQ-' + ''.join(secrets.choice(alphabet) for _ in range(8))
+
+
+class ApplyRateLimiter:
+    """按 IP 的申请频率限制（滑动窗口：存时间戳列表，查询时裁剪）。
+
+    这是**防刷**不是防爆破 —— 真正闸门是人工审批；被刷只会产生待处理行。
+    """
+
+    def __init__(self, per_hour=3, per_day=10, max_ips=5000):
+        self.per_hour = max(1, int(per_hour))
+        self.per_day = max(1, int(per_day))
+        self.max_ips = max(100, int(max_ips))
+        self._lock = threading.Lock()
+        self._hits = {}
+
+    def check(self, ip):
+        """→ 需等待的秒数（0 = 允许提交）。"""
+        now = time.time()
+        with self._lock:
+            self._prune(now)
+            hits = [t for t in self._hits.get(ip, []) if now - t < 86400]
+            if hits:
+                self._hits[ip] = hits
+            else:
+                self._hits.pop(ip, None)   # 全过期 → 别留空壳（否则 _prune 永远清不掉）
+            if len(hits) >= self.per_day:
+                return max(1, int(86400 - (now - hits[0])))
+            hour = [t for t in hits if now - t < 3600]
+            if len(hour) >= self.per_hour:
+                return max(1, int(3600 - (now - hour[0])))
+            return 0
+
+    def record(self, ip):
+        with self._lock:
+            self._hits.setdefault(ip, []).append(time.time())
+
+    def _prune(self, now):
+        if len(self._hits) <= self.max_ips:
+            return
+        for k in [k for k, v in self._hits.items()
+                  if not v or now - v[-1] > 86400]:
+            self._hits.pop(k, None)
+
+
 # ---------------------------------------------------------------- key 库存
 
 class KeyInventory:
@@ -613,6 +846,86 @@ class QuotaStore:
             'key_usage': [dict(r) for r in key_usage],
             'recent_blocks': [dict(r) for r in recent_blocks],
         }
+
+    # -- API key 申请单 ------------------------------------------------
+
+    def create_request(self, req_no, name, contact, purpose, want_groups, volume, ip=''):
+        with self.lock:
+            c = self._conn()
+            cur = c.execute(
+                'INSERT INTO key_requests(req_no,name,contact,purpose,want_groups,volume,'
+                'status,created_at,client_ip) VALUES(?,?,?,?,?,?,?,?,?)',
+                (req_no, name, contact or '', purpose or '',
+                 json.dumps(list(want_groups or []), ensure_ascii=False),
+                 volume or '', 'pending', int(time.time()), ip or ''))
+            rid = cur.lastrowid
+            c.commit()
+            c.close()
+            return rid
+
+    @staticmethod
+    def _req_row(r):
+        if r is None:
+            return None
+        d = dict(r)
+        for k in ('want_groups', 'granted_groups'):
+            try:
+                d[k] = json.loads(d.get(k) or '[]')
+            except (json.JSONDecodeError, TypeError):
+                d[k] = []
+        return d
+
+    def get_request(self, req_no=None, req_id=None):
+        with self.lock:
+            c = self._conn()
+            if req_no is not None:
+                r = c.execute('SELECT * FROM key_requests WHERE req_no=?', (req_no,)).fetchone()
+            else:
+                r = c.execute('SELECT * FROM key_requests WHERE id=?', (int(req_id),)).fetchone()
+            c.close()
+            return self._req_row(r)
+
+    def list_requests(self, status=None, limit=200):
+        with self.lock:
+            c = self._conn()
+            if status:
+                rows = c.execute(
+                    'SELECT * FROM key_requests WHERE status=? ORDER BY id DESC LIMIT ?',
+                    (status, int(limit))).fetchall()
+            else:
+                rows = c.execute('SELECT * FROM key_requests ORDER BY id DESC LIMIT ?',
+                                 (int(limit),)).fetchall()
+            c.close()
+            return [self._req_row(r) for r in rows]
+
+    def count_pending_requests(self):
+        with self.lock:
+            c = self._conn()
+            n = c.execute("SELECT COUNT(*) n FROM key_requests WHERE status='pending'").fetchone()['n']
+            c.close()
+            return n
+
+    def decide_request(self, req_id, status, decided_by='', reject_reason='',
+                       mc_key_id='', mc_key_name='', granted_groups=None):
+        with self.lock:
+            c = self._conn()
+            c.execute(
+                'UPDATE key_requests SET status=?, decided_at=?, decided_by=?, reject_reason=?, '
+                'mc_key_id=?, mc_key_name=?, granted_groups=? WHERE id=?',
+                (status, int(time.time()), decided_by or '', reject_reason or '',
+                 mc_key_id or '', mc_key_name or '',
+                 json.dumps(list(granted_groups or []), ensure_ascii=False), int(req_id)))
+            c.commit()
+            c.close()
+
+    def mark_picked(self, req_id):
+        """记录领取时间。token 本体在内存里已抹除，这里只留痕。"""
+        with self.lock:
+            c = self._conn()
+            c.execute('UPDATE key_requests SET picked_at=? WHERE id=?',
+                      (int(time.time()), int(req_id)))
+            c.commit()
+            c.close()
 
     # -- 调用流水 ----------------------------------------------------
 
@@ -1076,6 +1389,36 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             self.server.throttle = t
         return t
 
+    @property
+    def _mcphub(self):
+        m = getattr(self.server, 'mcphub', None)
+        if m is None:
+            cfg = self.server.cfg.current()
+            m = McphubAdmin(cfg.get('mcphub_api_base') or 'http://127.0.0.1:3100/hub/api',
+                            cfg.get('mcphub_admin_key') or '')
+            self.server.mcphub = m          # 缓存到 server 上，避免每次访问都新建
+        return m
+
+    @property
+    def _pending(self):
+        p = getattr(self.server, 'pending', None)
+        if p is None:
+            cfg = self.server.cfg.current()
+            p = PendingTokens(ttl_seconds=(cfg.get('apply_pickup_hours') or 168) * 3600)
+            # 必须缓存！否则每次访问都是新实例，「领取即抹」会失效
+            self.server.pending = p
+        return p
+
+    @property
+    def _apply_limiter(self):
+        r = getattr(self.server, 'apply_limiter', None)
+        if r is None:
+            cfg = self.server.cfg.current()
+            r = ApplyRateLimiter(per_hour=cfg.get('apply_rate_hour') or 3,
+                                 per_day=cfg.get('apply_rate_day') or 10)
+            self.server.apply_limiter = r
+        return r
+
     # ── 客户端信息 ──────────────────────────────────────────────
 
     def _client_ip(self):
@@ -1255,11 +1598,26 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return self._me()
         if path == '/' or path == '/index.html':
             return self._serve_html()
+        # ── 匿名：申请页 + 申请状态查询 ──
+        if path in ('/apply', '/apply/'):
+            return self._serve_apply_html()
+        if path == '/api/apply/meta':
+            return self._apply_meta()
+        m = re.fullmatch(r'/api/apply/(REQ-[A-Za-z0-9]+)', path)
+        if m:
+            return self._apply_status(m.group(1).upper())
         if not self._authed():
             return
+        if path == '/api/requests':
+            return self._requests_list()
+        m = re.fullmatch(r'/api/requests/(\d+)/token', path)
+        if m:
+            return self._request_token(int(m.group(1)))
         if path == '/api/state':
             cfg = self.server.cfg.current()
-            masked = {k: v for k, v in cfg.items() if k != 'admin_token'}
+            # 脱敏：这两个都是能直接用的凭据，绝不能回给前端
+            SECRET_KEYS = ('admin_token', 'mcphub_admin_key')
+            masked = {k: v for k, v in cfg.items() if k not in SECRET_KEYS}
             stats = self.server.store.call_stats()
             return self._json(200, {
                 'config': masked,
@@ -1267,6 +1625,9 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
                 'series_7d': self.server.store.daily_series(7, cfg.get('heavy_tools')),
                 'today_success_rate': stats['success_rate'],
                 'today_latency': {'p50': stats['p50'], 'p95': stats['p95']},
+                'pending_requests': self.server.store.count_pending_requests(),
+                'claimable_tokens': len(self._pending.pending()),
+                'mcphub_configured': bool(cfg.get('mcphub_admin_key')),
                 **self.server.store.state(),
             })
         if path == '/api/calls':
@@ -1325,8 +1686,19 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return self._login()
         if path == '/api/logout':
             return self._logout()
+        # ── 匿名：提交申请 + 领取密钥（凭单号） ──
+        if path == '/api/apply':
+            return self._apply_submit()
+        m = re.fullmatch(r'/api/apply/(REQ-[A-Za-z0-9]+)/pickup', path)
+        if m:
+            return self._apply_pickup(m.group(1).upper())
         if not self._authed():
             return
+        m = re.fullmatch(r'/api/requests/(\d+)/(approve|reject|reissue)', path)
+        if m:
+            return {'approve': self._request_approve,
+                    'reject': self._request_reject,
+                    'reissue': self._request_reissue}[m.group(2)](int(m.group(1)))
         if path == '/api/password':
             return self._change_password()
         if path == '/api/reload_inventory':
@@ -1412,16 +1784,315 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         if heavy is not None and not isinstance(heavy, list):
             raise ValueError('heavy_tools 必须是数组')
 
+    # ── API key 申请：匿名端点（公开） ──────────────────────────────
+
+    def _apply_meta(self):
+        """申请页用的公开元信息（无需鉴权，不含任何敏感数据）。"""
+        cfg = self.server.cfg.current()
+        groups = list(cfg.get('apply_groups') or [])
+        labels = {'data': '行情/资讯数据（免费额度）',
+                  'alpha': '因子挖掘 · 回测 · 因果分析（付费）',
+                  'memory': '因果记忆（付费）',
+                  'match': '通用工具（时间/抓取/思维链）'}
+        return self._json(200, {
+            'ok': True,
+            'groups': [{'name': g, 'label': labels.get(g, g)} for g in groups],
+            'rate_hour': cfg.get('apply_rate_hour') or 3,
+        })
+
+    def _apply_submit(self):
+        """申请人提交 → 建单，返回申请单号。匿名，按 IP 限流。"""
+        cfg = self.server.cfg.current()
+        ip = self._client_ip()
+        wait = self._apply_limiter.check(ip)
+        if wait:
+            return self._json(429, {'error': 'too_many_requests', 'retry_after': wait,
+                                    'hint': '提交过于频繁，请 %d 分钟后再试' % max(1, wait // 60)})
+        body = self._read_json()
+        if body is None:
+            return self._json(400, {'error': 'invalid_json'})
+        name = str(body.get('name') or '').strip()[:60]
+        if not name:
+            return self._json(400, {'error': 'name_required', 'hint': '请填写称呼或团队名'})
+        contact = str(body.get('contact') or '').strip()[:120]
+        if not contact:
+            return self._json(400, {'error': 'contact_required',
+                                    'hint': '请留联系方式（邮箱或微信），否则审批通过也无法通知你'})
+        purpose = str(body.get('purpose') or '').strip()[:500]
+        volume = str(body.get('volume') or '').strip()[:60]
+        allowed = list(cfg.get('apply_groups') or [])
+        want = body.get('groups') or []
+        if not isinstance(want, list):
+            want = []
+        want = [g for g in want if g in allowed]
+        if not want:
+            return self._json(400, {'error': 'groups_required',
+                                    'hint': '请至少选择一个分组（可选：%s）' % ', '.join(allowed)})
+        req_no = new_request_no()
+        rid = self.server.store.create_request(req_no, name, contact, purpose, want, volume, ip)
+        self._apply_limiter.record(ip)
+        return self._json(200, {
+            'ok': True, 'id': rid, 'req_no': req_no,
+            'hint': '申请已提交，等待管理员审批。请记下申请单号，审批通过后凭它领取密钥。',
+            'poll': 'GET /api/apply/' + req_no,
+        })
+
+    def _apply_status(self, req_no):
+        """申请状态查询（匿名，凭单号）。**不返回 token** —— token 只走 pickup。"""
+        req = self.server.store.get_request(req_no=req_no)
+        if not req:
+            return self._json(404, {'error': 'not_found', 'hint': '申请单号不存在'})
+        pending_tok = self._pending.peek(req_no)
+        out = {
+            'req_no': req['req_no'], 'status': req['status'],
+            'name': req['name'], 'want_groups': req['want_groups'],
+            'granted_groups': req['granted_groups'],
+            'created_at': req['created_at'], 'decided_at': req['decided_at'],
+            'picked_at': req['picked_at'],
+        }
+        if req['status'] == 'rejected':
+            out['reject_reason'] = req['reject_reason']
+        if req['status'] == 'approved':
+            if pending_tok:
+                out['claimable'] = True
+                out['hint'] = '审批已通过，请在领取页输入申请单号获取密钥（只能领一次）'
+            elif req['picked_at']:
+                out['claimable'] = False
+                out['hint'] = '密钥已被领取。若丢失，请联系管理员重新发放。'
+            else:
+                out['claimable'] = False
+                out['hint'] = '审批已通过但密钥已过期或服务重启导致失效，请联系管理员重新发放。'
+        return self._json(200, out)
+
+    def _apply_pickup(self, req_no):
+        """领取密钥（匿名，凭单号）→ 返回明文 token 与接入说明，**随即抹除**。
+
+        用 POST 而不是 GET：GET 可能被浏览器/代理缓存或进访问日志，不该承载密钥。
+        """
+        req = self.server.store.get_request(req_no=req_no)
+        if not req:
+            return self._json(404, {'error': 'not_found', 'hint': '申请单号不存在'})
+        if req['status'] != 'approved':
+            return self._json(409, {'error': 'not_approved', 'hint': '该申请尚未通过审批'})
+        tok = self._pending.pop(req_no)      # ← 取走即删
+        if not tok:
+            return self._json(410, {'error': 'already_picked_or_expired',
+                                    'hint': '密钥已被领取或已过期。请联系管理员重新发放。'})
+        self.server.store.mark_picked(req['id'])
+        groups = tok['groups']
+        return self._json(200, {
+            'ok': True, 'req_no': req_no, 'key_name': tok['key_name'],
+            'token': tok['token'], 'groups': groups,
+            'access': self._access_snippet(groups),
+            'warning': '密钥只显示这一次，已从服务器抹除。请立即保存到你的客户端配置或密码管理器。',
+        })
+
+    @staticmethod
+    def _access_snippet(groups):
+        base = 'https://causal-memory.com/hub/mcp/'
+        return {
+            'per_group': [{'group': g, 'url': base + g} for g in groups],
+            'header': 'Authorization: Bearer <你的密钥>',
+            'note': ('密钥按分组收窄，**必须使用带组名的地址**（/hub/mcp/<组名>）；'
+                     '不带组名的 /hub/mcp 会被网关拒绝。'),
+            'example_claude_desktop': {
+                'mcpServers': {
+                    'quant': {'type': 'http', 'url': base + (groups[0] if groups else 'data'),
+                              'headers': {'Authorization': 'Bearer <你的密钥>'}}
+                }
+            },
+        }
+
+    # ── API key 申请：管理端点（需鉴权） ────────────────────────────
+
+    def _actor(self):
+        username, method, _ = self._session()
+        return username or ('token' if self._token_ok() else '?')
+
+    def _requests_list(self):
+        cfg = self.server.cfg.current()
+        qs = parse_qs(urlparse(self.path).query)
+        status = (qs.get('status') or [''])[0] or None
+        rows = self.server.store.list_requests(status=status, limit=300)
+        pend = self._pending.pending()
+        for r in rows:
+            r['token_pending'] = r['req_no'] in pend
+            r['token_age_sec'] = (pend.get(r['req_no']) or {}).get('age_sec')
+        return self._json(200, {
+            'requests': rows,
+            'pending_count': self.server.store.count_pending_requests(),
+            'claimable_count': len(pend),
+            'apply_groups': list(cfg.get('apply_groups') or []),
+            'tiers': sorted((cfg.get('tiers') or {}).keys()),
+            'default_tier': cfg.get('apply_default_tier') or 'paid',
+        })
+
+    def _request_token(self, rid):
+        """管理台兜底：查看某单待领取的 token（用于申请人领不到时人工转发）。"""
+        req = self.server.store.get_request(req_id=rid)
+        if not req:
+            return self._json(404, {'error': 'not_found'})
+        tok = self._pending.peek(req['req_no'])
+        if not tok:
+            return self._json(404, {'error': 'no_pending_token',
+                                    'hint': '没有待领取的密钥（已领取/已过期/服务重启）。可用「改发」重新生成。'})
+        return self._json(200, {'ok': True, 'req_no': req['req_no'],
+                                'key_name': tok['key_name'], 'token': tok['token'],
+                                'groups': tok['groups'],
+                                'access': self._access_snippet(tok['groups'])})
+
+    _KEY_NAME_SAFE = re.compile(r'[^0-9A-Za-z\u4e00-\u9fff._-]+')
+
+    def _make_key_name(self, req, suffix=None):
+        """mcphub 里的 key 名（同时是配额平台的 key_name）。
+
+        带上单号后缀保证唯一 —— 同名会让 quota 的 `key_overrides` 互相覆盖。
+        """
+        base = self._KEY_NAME_SAFE.sub('-', str(req['name']).strip())[:24].strip('-') or 'user'
+        tag = (suffix or req['req_no'].split('-')[-1]).lower()[:6]
+        return '%s-%s' % (base, tag)
+
+    def _apply_tier(self, key_name, groups, tier):
+        """把档位写进 key_overrides[key_name].tier_by_group（按组覆盖，热生效）。"""
+        cfg = self.server.cfg.current()
+        limits = dict((cfg.get('tiers') or {}).get(tier) or {})
+        overrides = dict(cfg.get('key_overrides') or {})
+        entry = dict(overrides.get(key_name) or {})
+        tbg = dict(entry.get('tier_by_group') or {})
+        for g in groups:
+            tbg[g] = limits
+        entry['tier_by_group'] = tbg
+        overrides[key_name] = entry
+        self.server.cfg.save_quota_rules({'key_overrides': overrides})
+
+    def _request_approve(self, rid):
+        cfg = self.server.cfg.current()
+        body = self._read_json()
+        if body is None:
+            return self._json(400, {'error': 'invalid_json'})
+        req = self.server.store.get_request(req_id=rid)
+        if not req:
+            return self._json(404, {'error': 'not_found'})
+        if req['status'] == 'approved':
+            return self._json(409, {'error': 'already_approved',
+                                    'hint': '该申请已通过。要换分组/档位请用「改发」。'})
+        allowed = set(cfg.get('apply_groups') or [])
+        groups = body.get('groups') or req['want_groups'] or []
+        groups = [g for g in groups if g in allowed]
+        if not groups:
+            return self._json(400, {'error': 'groups_required',
+                                    'hint': '至少选一个分组（可选：%s）' % ', '.join(sorted(allowed))})
+        tiers = cfg.get('tiers') or {}
+        tier = str(body.get('tier') or cfg.get('apply_default_tier') or 'paid')
+        if tier not in tiers:
+            return self._json(400, {'error': 'unknown_tier',
+                                    'hint': '可选档位：%s' % ', '.join(sorted(tiers))})
+        key_name = self._make_key_name(req)
+        try:
+            kid, kname, token = self._mcphub.create_key(key_name, groups)
+        except MCPhubError as e:
+            return self._json(502, {'error': 'mcphub_failed', 'hint': str(e)})
+        warn = ''
+        try:
+            self._apply_tier(kname, groups, tier)
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            # key 已建好，档位没写上会落到 default 档（500/天）。不回滚 key ——
+            # 回滚等于要重新发一次，反而更容易发错；提示管理员重试保存即可。
+            warn = '密钥已创建，但配额档位写入失败（会落到 default 档）：%s' % e
+        self._pending.put(req['req_no'], token, kname, groups)
+        self.server.store.decide_request(rid, 'approved', decided_by=self._actor(),
+                                         mc_key_id=kid, mc_key_name=kname,
+                                         granted_groups=groups)
+        return self._json(200, {
+            'ok': True, 'req_no': req['req_no'], 'key_name': kname, 'key_id': kid,
+            'groups': groups, 'tier': tier, 'warning': warn or None,
+            'hint': '已创建。请通知申请人凭单号 %s 到领取页取密钥；你也可以在下面点「查看密钥」代为转发。'
+                    % req['req_no'],
+            'access': self._access_snippet(groups),
+        })
+
+    def _request_reject(self, rid):
+        body = self._read_json()
+        if body is None:
+            return self._json(400, {'error': 'invalid_json'})
+        req = self.server.store.get_request(req_id=rid)
+        if not req:
+            return self._json(404, {'error': 'not_found'})
+        if req['status'] == 'approved':
+            return self._json(409, {'error': 'already_approved',
+                                    'hint': '已通过的申请不能拒绝；如需停用请到 key 列表禁用该 key'})
+        reason = str(body.get('reason') or '').strip()[:300]
+        self.server.store.decide_request(rid, 'rejected', decided_by=self._actor(),
+                                         reject_reason=reason)
+        self._pending.drop(req['req_no'])
+        return self._json(200, {'ok': True, 'req_no': req['req_no'], 'status': 'rejected'})
+
+    def _request_reissue(self, rid):
+        """改发：建新 key（换后缀）→ 停用旧 key → 新 token 进待领取。
+
+        用在 token 丢失（服务重启 / 已领取但客户弄丢）或要改分组的时候。
+        """
+        cfg = self.server.cfg.current()
+        body = self._read_json()
+        if body is None:
+            return self._json(400, {'error': 'invalid_json'})
+        req = self.server.store.get_request(req_id=rid)
+        if not req:
+            return self._json(404, {'error': 'not_found'})
+        allowed = set(cfg.get('apply_groups') or [])
+        groups = body.get('groups') or req['granted_groups'] or req['want_groups'] or []
+        groups = [g for g in groups if g in allowed]
+        if not groups:
+            return self._json(400, {'error': 'groups_required', 'hint': '至少选一个分组'})
+        tiers = cfg.get('tiers') or {}
+        tier = str(body.get('tier') or cfg.get('apply_default_tier') or 'paid')
+        if tier not in tiers:
+            return self._json(400, {'error': 'unknown_tier'})
+        key_name = self._make_key_name(req, suffix=secrets.token_hex(3))
+        try:
+            kid, kname, token = self._mcphub.create_key(key_name, groups)
+        except MCPhubError as e:
+            return self._json(502, {'error': 'mcphub_failed', 'hint': str(e)})
+        old_note = ''
+        if req['mc_key_id']:
+            try:
+                self._mcphub.set_enabled(req['mc_key_id'], False)
+                old_note = '旧密钥已停用（%s）' % (req['mc_key_name'] or req['mc_key_id'])
+            except MCPhubError as e:
+                old_note = '⚠ 旧密钥停用失败，请到 mcphub 手动处理：%s' % e
+        warn = ''
+        try:
+            self._apply_tier(kname, groups, tier)
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            warn = '配额档位写入失败：%s' % e
+        self._pending.drop(req['req_no'])
+        self._pending.put(req['req_no'], token, kname, groups)
+        self.server.store.decide_request(rid, 'approved', decided_by=self._actor(),
+                                         mc_key_id=kid, mc_key_name=kname,
+                                         granted_groups=groups)
+        return self._json(200, {'ok': True, 'req_no': req['req_no'], 'key_name': kname,
+                                'key_id': kid, 'groups': groups, 'tier': tier,
+                                'old_key_note': old_note, 'warning': warn or None,
+                                'access': self._access_snippet(groups)})
+
     def _serve_html(self):
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'admin.html')
+        return self._serve_static('admin.html')
+
+    def _serve_apply_html(self):
+        """API key 申请页：匿名可访问（公开）。页面不含数据，数据全走 API。"""
+        return self._serve_static('apply.html')
+
+    def _serve_static(self, filename):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', filename)
         try:
             with open(path, 'rb') as f:
                 body = f.read()
         except OSError:
-            return self._json(500, {'error': 'admin.html missing'})
+            return self._json(500, {'error': filename + ' missing'})
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(body)
 
@@ -1463,6 +2134,13 @@ def main():
     throttle = LoginThrottle(max_fails=cfg.current().get('admin_login_max_fails') or 5,
                              lock_seconds=cfg.current().get('admin_login_lock_seconds') or 900)
 
+    # API key 自助申请：mcphub 管理客户端 + 内存待领取 token + 申请频率限制
+    mcphub = McphubAdmin(cfg.current().get('mcphub_api_base') or 'http://127.0.0.1:3100/hub/api',
+                         cfg.current().get('mcphub_admin_key') or '')
+    pending = PendingTokens(ttl_seconds=(cfg.current().get('apply_pickup_hours') or 168) * 3600)
+    apply_limiter = ApplyRateLimiter(per_hour=cfg.current().get('apply_rate_hour') or 3,
+                                     per_day=cfg.current().get('apply_rate_day') or 10)
+
     def prune_loop():
         while True:
             try:
@@ -1488,6 +2166,7 @@ def main():
     admin_srv = ThreadingHTTPServer((acfg['host'], args.admin_port or acfg['port']), AdminPlaneHandler)
     admin_srv.cfg, admin_srv.store, admin_srv.inventory = cfg, store, inventory
     admin_srv.users, admin_srv.sessions, admin_srv.throttle = users, sessions, throttle
+    admin_srv.mcphub, admin_srv.pending, admin_srv.apply_limiter = mcphub, pending, apply_limiter
 
     threading.Thread(target=data_srv.serve_forever, daemon=True).start()
     threading.Thread(target=admin_srv.serve_forever, daemon=True).start()

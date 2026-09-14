@@ -15,6 +15,7 @@ services:
     <<: *common
     build:
       context: ./factor-miner-mcp
+      network: host
       args:
         PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
     image: factor-miner-mcp:server
@@ -32,11 +33,11 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - /opt/athena-mcp/qlib_data:/app/.qlib/qlib_data
-      - /opt/athena-mcp/data/factor_mining:/app/data/factor_mining
-      - /opt/athena-mcp/models:/app/models
-      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
-      - /opt/mcp-suite/usage/factor-miner:/app/usage
+      - ./data/qlib_data:/app/.qlib/qlib_data
+      - ./data/factor_mining:/app/data/factor_mining
+      - ./models:/app/models
+      - ./licenses/licenses.json:/app/licenses/licenses.json:ro
+      - ./usage/factor-miner:/app/usage
 
   astock-data:
     <<: *common
@@ -49,8 +50,8 @@ services:
     ports:
       - "127.0.0.1:50052:50052"
     volumes:
-      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
-      - /opt/mcp-suite/usage/astock-data:/app/usage
+      - ./licenses/licenses.json:/app/licenses/licenses.json:ro
+      - ./usage/astock-data:/app/usage
 
   global-data:
     <<: *common
@@ -63,8 +64,8 @@ services:
     ports:
       - "127.0.0.1:50058:50058"
     volumes:
-      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
-      - /opt/mcp-suite/usage/global-data:/app/usage
+      - ./licenses/licenses.json:/app/licenses/licenses.json:ro
+      - ./usage/global-data:/app/usage
 
   causal:
     <<: *common
@@ -77,8 +78,8 @@ services:
     ports:
       - "127.0.0.1:50057:50057"
     volumes:
-      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
-      - /opt/mcp-suite/usage/causal:/app/usage
+      - ./licenses/licenses.json:/app/licenses/licenses.json:ro
+      - ./usage/causal:/app/usage
 
   kronos:
     <<: *common
@@ -91,8 +92,8 @@ services:
     ports:
       - "127.0.0.1:50059:50059"
     volumes:
-      - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
-      - /opt/mcp-suite/usage/kronos:/app/usage
+      - ./licenses/licenses.json:/app/licenses/licenses.json:ro
+      - ./usage/kronos:/app/usage
 
   redis:
     image: redis:7-alpine
@@ -112,8 +113,8 @@ services:
       BASE_PATH: /hub
       ADMIN_PASSWORD: ${MCPHUB_ADMIN_PASSWORD:?在 .env 里配置}
     volumes:
-      - /opt/mcp-hub/mcp_settings.json:/app/mcp_settings.json
-      - /opt/mcp-hub/data:/app/data
+      - ./mcphub/mcp_settings.json:/app/mcp_settings.json
+      - ./mcphub/data:/app/data
 
   # 统一配额管控：挡在 mcphub 前，per-key × per-group 计量/配额，SSE 透传
   # nginx /hub/ 改指 :3200，/quota/ 管理台走 :3300（详见 quota-platform/README.md）
@@ -125,34 +126,11 @@ services:
     environment:
       TZ: Asia/Shanghai
       QUOTA_ADMIN_TOKEN: ${QUOTA_ADMIN_TOKEN:?在 .env 里配置}
-      # API key 自助申请：建 key 用的 mcphub「system + all-access」key。
-      # 用 :- 而非 :? —— 缺它只影响"审批建 key"这一功能（管理台会显式提示、
-      # 审批接口返 502 带原因），不该让挡在全部 MCP 流量前的这一层起不来。
-      MCPHUB_ADMIN_KEY: ${MCPHUB_ADMIN_KEY:-}
     volumes:
       - ./quota-platform:/app
-      - /opt/mcp-hub/mcp_settings.json:/mnt/mcp_settings.json:ro   # key 库存只读挂载
-      - /opt/mcp-suite/quota-platform:/data                        # config.json + quota.db 持久化
+      - ./mcphub/mcp_settings.json:/mnt/mcp_settings.json:ro   # key 库存只读挂载
+      - ./quota-platform-data:/data                        # config.json + quota.db 持久化
     command: python /app/server.py --config /data/config.json --db /data/quota.db
 
   # 官网 Next.js 走 systemd 裸进程（见 systemd/causal-memory-web.service），不在本编排内
 
-  causal-memory:
-    build:
-      context: ./causal-memory-src
-      dockerfile: Dockerfile.server
-    image: causal-memory:server
-    container_name: mcp-causal-memory
-    ports:
-      - "127.0.0.1:50061:50061"
-    environment:
-      TZ: Asia/Shanghai
-      CAUSAL_MEMORY_HTTP_AUTH_TOKEN: ${CAUSAL_MEMORY_HTTP_AUTH_TOKEN}
-      # 多租户模式：/mcp bearer 鉴权 + 每租户独立 DB（tenants/ 子目录）
-      # 目录模式：合并 /tokens 下全部 *.json（tokens.json=运维手工管理，cloud.json=官网 dashboard 桥接）
-      CAUSAL_MEMORY_TOKENS_FILE: /tokens
-    volumes:
-      # causal-memory 忽略 XDG_DATA_HOME，固定写 $HOME/.local/share/causal-memory
-      - /opt/mcp-suite/causal-memory/cm-data-home:/root/.local/share/causal-memory
-      - /opt/mcp-suite/causal-memory/tokens:/tokens:ro
-    restart: unless-stopped

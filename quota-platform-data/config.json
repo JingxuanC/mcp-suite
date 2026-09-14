@@ -8,23 +8,12 @@
     "host": "0.0.0.0",
     "port": 3300
   },
-  "admin_token": "change-me",
+  "admin_token": "2d59f6de94f28b8b1c1454f18c0c7c8d",
   "admin_users_path": "",
   "admin_session_ttl": 43200,
   "admin_session_idle": 1800,
   "admin_login_max_fails": 5,
   "admin_login_lock_seconds": 900,
-  "mcphub_api_base": "http://127.0.0.1:3100/hub/api",
-  "mcphub_admin_key": "",
-  "apply_groups": [
-    "data",
-    "alpha",
-    "memory"
-  ],
-  "apply_default_tier": "paid",
-  "apply_rate_hour": 3,
-  "apply_rate_day": 10,
-  "apply_pickup_hours": 168,
   "mcp_settings_path": "/mnt/mcp_settings.json",
   "log_retention_days": 30,
   "groups": {
