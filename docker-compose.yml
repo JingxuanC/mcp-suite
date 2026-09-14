@@ -56,7 +56,10 @@ services:
       # 本地全市场代码表（factor-miner 日更维护）：get_a_trade_universe /
       # get_a_market_snapshot 的兜底来源。东财 clist 会返 502/静默截断分页，
       # 没有这条兜底时 universe 类工具会整体不可用。
-      - /opt/athena-mcp/qlib_data/cn_data/instruments:/app/.qlib/qlib_data/cn_data/instruments:ro
+      # ⚠️ 必须挂**祖父目录** qlib_data，不能挂 cn_data/instruments：日更的
+      # atomic_swap 会把整个 cn_data 目录 rename 掉（inode 变更），挂深层子目录
+      # 会一直指向已被删除的旧 inode → 容器里报 No such file（2026-09-14 实际发生）。
+      - /opt/athena-mcp/qlib_data:/app/.qlib/qlib_data:ro
 
   global-data:
     <<: *common
