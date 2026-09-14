@@ -70,9 +70,13 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
  申请人凭单号 ──▶ 领取页 ──▶ 显示 token + 接入片段，随即抹除
 ```
 
+公开入口在主页 **https://causal-memory.com/apply**（由 website 仓渲染，经站内
+`/api/key-request/*` 服务端代理转发到下面这些接口）—— 申请页**不再挂在管控台路径下**，
+以免公开 URL 暴露内部平台结构。管控台这里只提供 API：
+
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
-| `GET /apply` | 匿名 | 申请页（公开） |
+| ~~`GET /apply`~~ | — | 已移除，返回 404 并提示去主页（避免两个页面各自漂移） |
 | `GET /api/apply/meta` | 匿名 | 可选分组等元信息 |
 | `POST /api/apply` | 匿名 | 提交申请 → 返回申请单号 `REQ-XXXXXXXX`；按 IP 限流 |
 | `GET /api/apply/<单号>` | 匿名 | 查状态（**不返回密钥**） |

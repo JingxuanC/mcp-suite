@@ -1136,11 +1136,17 @@ class KeyRequestFlowTest(unittest.TestCase):
         self.assertNotIn('mcphub_admin_key', b['config'])
         self.assertIn('pending_requests', b)
 
-    def test_apply_page_is_served(self):
+    def test_apply_page_is_not_served_under_internal_plane(self):
+        """申请页在主页（https://causal-memory.com/apply），不再挂在管控台路径下，
+        以免公开 URL 泄漏内部平台结构。这里只保留 API。"""
         s, b = self.call('GET', '/apply')
-        self.assertEqual(s, 200)   # HTML 页，解析失败会落到 _raw
-        self.assertIn('_raw', b)
-        self.assertIn('申请 API Key', b['_raw'])
+        self.assertEqual(s, 404)
+        self.assertEqual(b['error'], 'not_found')
+        self.assertIn('causal-memory.com/apply', b['hint'])
+        # 但 API 必须还在（主页代理依赖它）
+        s, b = self.call('GET', '/api/apply/meta')
+        self.assertEqual(s, 200)
+        self.assertTrue(b['groups'])
 
 
 if __name__ == '__main__':

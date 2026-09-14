@@ -1598,9 +1598,10 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return self._me()
         if path == '/' or path == '/index.html':
             return self._serve_html()
-        # ── 匿名：申请页 + 申请状态查询 ──
+        # ── 匿名：申请状态查询（申请页在主页 https://causal-memory.com/apply）──
         if path in ('/apply', '/apply/'):
-            return self._serve_apply_html()
+            return self._json(404, {'error': 'not_found',
+                                    'hint': '申请页已迁到 https://causal-memory.com/apply'})
         if path == '/api/apply/meta':
             return self._apply_meta()
         m = re.fullmatch(r'/api/apply/(REQ-[A-Za-z0-9]+)', path)
@@ -2077,10 +2078,6 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
 
     def _serve_html(self):
         return self._serve_static('admin.html')
-
-    def _serve_apply_html(self):
-        """API key 申请页：匿名可访问（公开）。页面不含数据，数据全走 API。"""
-        return self._serve_static('apply.html')
 
     def _serve_static(self, filename):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', filename)
