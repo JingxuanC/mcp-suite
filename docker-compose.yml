@@ -53,6 +53,10 @@ services:
     volumes:
       - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
       - /opt/mcp-suite/usage/astock-data:/app/usage
+      # 本地全市场代码表（factor-miner 日更维护）：get_a_trade_universe /
+      # get_a_market_snapshot 的兜底来源。东财 clist 会返 502/静默截断分页，
+      # 没有这条兜底时 universe 类工具会整体不可用。
+      - /opt/athena-mcp/qlib_data/cn_data/instruments:/app/.qlib/qlib_data/cn_data/instruments:ro
 
   global-data:
     <<: *common
