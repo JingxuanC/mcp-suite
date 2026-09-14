@@ -9,6 +9,11 @@
     "port": 3300
   },
   "admin_token": "change-me",
+  "admin_users_path": "",
+  "admin_session_ttl": 43200,
+  "admin_session_idle": 1800,
+  "admin_login_max_fails": 5,
+  "admin_login_lock_seconds": 900,
   "mcp_settings_path": "/mnt/mcp_settings.json",
   "log_retention_days": 30,
   "groups": {

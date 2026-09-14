@@ -22,12 +22,20 @@ MCPHub 只鉴权（key→用户→分组可见性）、不计量：key 过了校
 ## 快速开始
 
 ```bash
-cp config.example.json config.json   # 改 admin_token / groups / tiers
+cp config.example.json config.json   # 改 groups / tiers
 python server.py --config config.json
 # 数据面 :3200  管理面 :3300
 ```
 
-跑测试：`python -m unittest discover -s tests -v`（27 个用例）
+创建管理台账号（口令只落 scrypt 哈希，交互输入不回显）：
+
+```bash
+python3 scripts/set_admin_password.py --username admin   # 建号/改密，立即生效
+python3 scripts/set_admin_password.py --list             # 看有哪些账号
+python3 scripts/set_admin_password.py --username ops --disable
+```
+
+跑测试：`python -m unittest discover -s tests -v`（84 个用例）
 
 ## 管控模型
 
@@ -45,7 +53,27 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
 
 ## 管理面（:3300）
 
-生产环境经 nginx `https://causal-memory.com/quota/` 访问（前缀由 nginx 剥离）。输入管理令牌后：
+生产环境经 nginx `https://causal-memory.com/quota/` 访问（前缀由 nginx 剥离）。**用账号 + 口令登录**，登录后：
+
+### 鉴权
+
+| 方式 | 用途 | 说明 |
+|---|---|---|
+| **账号 + 口令**（推荐） | 人 | `POST /api/login` 校验 scrypt 哈希，下发 `qp_session` 会话 cookie |
+| `X-Admin-Token` 头 | 脚本 / 应急 | 保留兼容，静态共享秘密，不适合给人用 |
+
+口令与会话的几个要点：
+
+- **口令只存 scrypt 哈希**（`scrypt$n$r$p$salt$hash`，n=16384），不可逆；账号文件 `admin_users.json` 权限 `0600`
+- **会话 cookie 是 `HttpOnly; SameSite=Strict`**，JS 读不到（XSS 拿不走），默认 12h 上限 + 30min 空闲过期；`Secure` 在 HTTPS 下自动加
+- **cookie Path 跟随 `X-Forwarded-Prefix`**：经 nginx `/quota/` 访问时限制在 `/quota/`，不会被发到 `/hub/` 的 MCP 调用上
+- **登录失败限流**：按 IP 与 (IP, 账号) 双维度，默认连续 5 次失败锁 15 分钟；账号不存在时也跑一次 scrypt，避免用响应时间枚举账号
+- **改口令会吊销该账号的其他会话**（`POST /api/password`，需原口令）
+- **CSRF**：cookie 鉴权的 POST 额外核对 `Origin`/`Referer` 与 `Host`（`SameSite=Strict` 之外的纵深防御）；令牌鉴权不做该校验（不是浏览器自动携带的凭据）
+- 页面内 `POST /api/me` 探测登录态：未登录显示登录页，未建账号时直接给出建号命令
+- 会话存在内存里：服务重启后需重新登录（换来零持久化状态）
+
+登录后：
 - 总览卡片：今日/本月调用、重度调用、24h 拦截、活跃 key、今日成功率、今日 p50/p95 延迟
 - 近 7 天调用量折线图（总调用 / 拦截，Canvas 手绘）
 - 今日分组用量、key 用量 TOP、最近拦截列表

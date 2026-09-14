@@ -1,4 +1,7 @@
 # 真实密钥/配置，永不提交（用 *.example 模板生成）
+quota-platform/admin_users.json
+quota-platform/config.json
+quota-platform/quota.db*
 .env
 causal-memory/tokens/
 licenses/licenses.json

@@ -140,7 +140,8 @@ class QuotaPlatformTest(unittest.TestCase):
 
     # -- 请求辅助 ----------------------------------------------------
 
-    def call(self, port, method, path, body=None, token=None, admin_token=None):
+    def call(self, port, method, path, body=None, token=None, admin_token=None,
+             cookie=None, headers_extra=None, return_headers=False):
         conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
         headers = {}
         if body is not None:
@@ -149,11 +150,15 @@ class QuotaPlatformTest(unittest.TestCase):
             headers['Authorization'] = f'Bearer {token}'
         if admin_token:
             headers['X-Admin-Token'] = admin_token
+        if cookie:
+            headers['Cookie'] = cookie
+        headers.update(headers_extra or {})
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
         raw = resp.read()
+        hdrs = dict(resp.getheaders())
         conn.close()
-        return resp.status, raw
+        return (resp.status, raw, hdrs) if return_headers else (resp.status, raw)
 
     # -- 用例 ----------------------------------------------------------
 
@@ -529,6 +534,266 @@ class QuotaPlatformTest(unittest.TestCase):
         ov = self.cfg.current()['key_overrides']['alice']
         self.assertTrue(ov['disabled'])
         self.assertEqual(ov['tier_by_group']['alpha']['daily'], 50)  # 额度覆盖未被覆盖
+
+
+
+class AdminAuthTest(QuotaPlatformTest):
+    """管理台账号登录 / 会话 / 限流。
+
+    背景：原先只有静态 X-Admin-Token（复制粘贴）。令牌是共享秘密，无法区分谁在用、
+    无法单独吊销；改成账号口令 + 短期会话。旧令牌保留给脚本/应急。
+    """
+
+    PW = 'test-password-1234'
+
+    def setUp(self):
+        super().setUp()
+        # 每个用例一个独立文件：共用路径会让前一个用例建的账号泄漏给后一个
+        self.users_path = os.path.join(self.tmp.name, 'admin_users-%s.json' % time.time_ns())
+        self.users = qp.AdminUsers(self.users_path)
+        self.sessions = qp.SessionStore(ttl=3600, idle=3600)
+        self.throttle = qp.LoginThrottle(max_fails=3, lock_seconds=60)
+        self.admin.users = self.users
+        self.admin.sessions = self.sessions
+        self.admin.throttle = self.throttle
+
+    def login(self, username='admin', password=None, headers_extra=None):
+        return self.call(self.admin_port, 'POST', '/api/login',
+                         body=json.dumps({'username': username,
+                                          'password': password or self.PW}),
+                         headers_extra=headers_extra, return_headers=True)
+
+    # ── 口令哈希 ──
+
+    def test_password_hash_is_scrypt_and_roundtrips(self):
+        h = qp.hash_password(self.PW)
+        self.assertTrue(h.startswith('scrypt$'))
+        self.assertNotIn(self.PW, h)              # 绝不明文
+        self.assertTrue(qp.verify_password(self.PW, h))
+        self.assertFalse(qp.verify_password('wrong', h))
+
+    def test_hash_salt_is_random(self):
+        self.assertNotEqual(qp.hash_password(self.PW), qp.hash_password(self.PW))
+
+    def test_verify_password_is_fail_closed(self):
+        for bad in (None, '', 'scrypt$bogus', 'md5$deadbeef', 'plaintext'):
+            self.assertFalse(qp.verify_password('x', bad))
+        self.assertFalse(qp.verify_password('x', None))
+
+    def test_short_password_rejected(self):
+        with self.assertRaises(ValueError):
+            qp.hash_password('short')
+
+    def test_users_file_is_0600_and_has_no_plaintext(self):
+        self.users.set_password('admin', self.PW)
+        mode = os.stat(self.users_path).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+        with open(self.users_path) as f:
+            self.assertNotIn(self.PW, f.read())
+
+    def test_verify_unknown_user_and_disabled_user(self):
+        self.users.set_password('admin', self.PW)
+        self.assertFalse(self.users.verify('nobody', self.PW))
+        self.users.set_disabled('admin', True)
+        self.assertFalse(self.users.verify('admin', self.PW))
+
+    # ── 登录流程 ──
+
+    def test_me_unauthenticated(self):
+        s, raw = self.call(self.admin_port, 'GET', '/api/me')
+        body = json.loads(raw)
+        self.assertEqual(s, 200)
+        self.assertFalse(body['authenticated'])
+        self.assertFalse(body['users_configured'])
+
+    def test_login_without_any_user_configured_is_503(self):
+        s, raw, _ = self.login()
+        self.assertEqual(s, 503)
+        self.assertEqual(json.loads(raw)['error'], 'no_admin_users')
+
+    def test_login_success_sets_httponly_samesite_cookie(self):
+        self.users.set_password('admin', self.PW)
+        s, raw, hdrs = self.login()
+        self.assertEqual(s, 200)
+        self.assertEqual(json.loads(raw)['username'], 'admin')
+        sc = hdrs.get('Set-Cookie', '')
+        self.assertIn('HttpOnly', sc)
+        self.assertIn('SameSite=Strict', sc)
+        self.assertIn('Path=/', sc)
+
+    def test_login_wrong_password_401(self):
+        self.users.set_password('admin', self.PW)
+        s, raw, _ = self.login(password='nope')
+        self.assertEqual(s, 401)
+        self.assertEqual(json.loads(raw)['error'], 'bad_credentials')
+
+    def test_session_cookie_authorizes_and_replaces_token(self):
+        self.users.set_password('admin', self.PW)
+        _, _, hdrs = self.login()
+        cookie = hdrs['Set-Cookie'].split(';')[0]
+        s, _ = self.call(self.admin_port, 'GET', '/api/state', cookie=cookie)
+        self.assertEqual(s, 200)
+
+    def test_bogus_cookie_is_rejected(self):
+        s, raw = self.call(self.admin_port, 'GET', '/api/state',
+                           cookie='qp_session=forged-session-id')
+        self.assertEqual(s, 401)
+
+    def test_logout_invalidates_session(self):
+        self.users.set_password('admin', self.PW)
+        _, _, hdrs = self.login()
+        cookie = hdrs['Set-Cookie'].split(';')[0]
+        s, _, clear = self.call(self.admin_port, 'POST', '/api/logout', cookie=cookie,
+                                return_headers=True)
+        self.assertEqual(s, 200)
+        self.assertIn('Max-Age=0', clear.get('Set-Cookie', ''))
+        s, _ = self.call(self.admin_port, 'GET', '/api/state', cookie=cookie)
+        self.assertEqual(s, 401)
+
+    def test_legacy_admin_token_still_works(self):
+        self.users.set_password('admin', self.PW)
+        s, _ = self.call(self.admin_port, 'GET', '/api/state', admin_token='secret-test')
+        self.assertEqual(s, 200)
+        s, _ = self.call(self.admin_port, 'GET', '/api/state', admin_token='wrong')
+        self.assertEqual(s, 401)
+
+    def test_state_hides_admin_token_from_config(self):
+        s, raw = self.call(self.admin_port, 'GET', '/api/state', admin_token='secret-test')
+        self.assertEqual(s, 200)
+        self.assertNotIn('admin_token', json.loads(raw)['config'])
+
+    # ── CSRF ──
+
+    def test_cookie_post_with_foreign_origin_is_rejected(self):
+        self.users.set_password('admin', self.PW)
+        _, _, hdrs = self.login()
+        cookie = hdrs['Set-Cookie'].split(';')[0]
+        s, raw = self.call(self.admin_port, 'POST', '/api/reload_inventory', body='',
+                           cookie=cookie,
+                           headers_extra={'Origin': 'https://evil.example'})
+        self.assertEqual(s, 403)
+        self.assertEqual(json.loads(raw)['error'], 'csrf_origin_mismatch')
+
+    def test_token_post_ignores_origin(self):
+        """令牌不是浏览器自动携带的凭据，不存在 CSRF，不该被 Origin 检查拦住。"""
+        s, _ = self.call(self.admin_port, 'POST', '/api/reload_inventory', body='',
+                         admin_token='secret-test',
+                         headers_extra={'Origin': 'https://evil.example'})
+        self.assertEqual(s, 200)
+
+    # ── 限流 ──
+
+    def test_lockout_after_repeated_failures(self):
+        self.users.set_password('admin', self.PW)
+        codes = [self.login(password='bad')[0] for _ in range(4)]
+        self.assertEqual(codes[:3], [401, 401, 401])
+        self.assertEqual(codes[3], 429)
+        s, raw, _ = self.login()          # 口令就算对了也被锁
+        self.assertEqual(s, 429)
+        self.assertIn('retry_after', json.loads(raw))
+
+    def test_lockout_is_per_ip_and_per_user(self):
+        t = qp.LoginThrottle(max_fails=2, lock_seconds=60)
+        t.fail('1.1.1.1', 'a')
+        t.fail('1.1.1.1', 'a')
+        self.assertGreater(t.check('1.1.1.1', 'a'), 0)
+        self.assertEqual(t.check('2.2.2.2', 'a'), 0)
+        t.succeed('1.1.1.1', 'a')
+        self.assertEqual(t.check('1.1.1.1', 'a'), 0)
+
+    def test_throttle_expires(self):
+        t = qp.LoginThrottle(max_fails=1, lock_seconds=1)
+        t.fail('3.3.3.3', 'a')
+        self.assertGreater(t.check('3.3.3.3', 'a'), 0)
+        time.sleep(1.1)
+        self.assertEqual(t.check('3.3.3.3', 'a'), 0)
+
+    # ── 会话生命周期 ──
+
+    def test_session_expires_on_ttl_and_idle(self):
+        s = qp.SessionStore(ttl=1, idle=1)
+        sid = s.create('admin')
+        self.assertIsNotNone(s.touch(sid))
+        time.sleep(1.1)
+        self.assertIsNone(s.touch(sid))
+
+    def test_session_idle_timeout_independent_of_ttl(self):
+        s = qp.SessionStore(ttl=3600, idle=1)
+        sid = s.create('admin')
+        time.sleep(1.1)
+        self.assertIsNone(s.touch(sid))     # 长时间没人动 → 失效
+
+    def test_change_password_revokes_other_sessions(self):
+        self.users.set_password('admin', self.PW)
+        _, _, h1 = self.login()
+        c1 = h1['Set-Cookie'].split(';')[0]
+        _, _, _ = self.login()
+        s, raw = self.call(self.admin_port, 'POST', '/api/password',
+                           body=json.dumps({'old_password': self.PW,
+                                            'new_password': 'brand-new-password'}),
+                           cookie=c1)
+        self.assertEqual(s, 200)
+        self.assertEqual(json.loads(raw)['revoked_sessions'], 1)
+        self.assertTrue(qp.verify_password('brand-new-password',
+                                           self.users.current()['admin']['hash']))
+
+    def test_change_password_requires_old_password(self):
+        self.users.set_password('admin', self.PW)
+        _, _, h = self.login()
+        c = h['Set-Cookie'].split(';')[0]
+        s, raw = self.call(self.admin_port, 'POST', '/api/password',
+                           body=json.dumps({'old_password': 'wrong',
+                                            'new_password': 'brand-new-password'}),
+                           cookie=c)
+        self.assertEqual(s, 401)
+
+    def test_change_password_rejects_weak_new_password(self):
+        self.users.set_password('admin', self.PW)
+        _, _, h = self.login()
+        c = h['Set-Cookie'].split(';')[0]
+        s, raw = self.call(self.admin_port, 'POST', '/api/password',
+                           body=json.dumps({'old_password': self.PW,
+                                            'new_password': 'short'}),
+                           cookie=c)
+        self.assertEqual(s, 400)
+        self.assertEqual(json.loads(raw)['error'], 'weak_password')
+
+    def test_change_password_not_allowed_for_token_sessions(self):
+        s, raw = self.call(self.admin_port, 'POST', '/api/password',
+                           body=json.dumps({'old_password': 'x',
+                                            'new_password': 'brand-new-password'}),
+                           admin_token='secret-test')
+        self.assertEqual(s, 403)
+        self.assertEqual(json.loads(raw)['error'], 'session_required')
+
+    # ── cookie 作用域 ──
+
+    def test_cookie_path_follows_forwarded_prefix(self):
+        """nginx 在 /quota/ 上剥前缀，会话 cookie 应限制在 /quota/，
+        否则会被浏览器发到 /hub/ 的 MCP 调用上。"""
+        self.users.set_password('admin', self.PW)
+        s, raw, hdrs = self.call(self.admin_port, 'POST', '/api/login',
+                                 body=json.dumps({'username': 'admin',
+                                                  'password': self.PW}),
+                                 headers_extra={'X-Forwarded-Prefix': '/quota',
+                                                'X-Forwarded-Proto': 'https'},
+                                 return_headers=True)
+        self.assertEqual(s, 200)
+        sc = hdrs['Set-Cookie']
+        self.assertIn('Path=/quota/', sc)
+        self.assertIn('Secure', sc)
+
+    def test_client_ip_trusts_last_forwarded_hop(self):
+        """nginx 用 $proxy_add_x_forwarded_for 追加真实来源到末尾，前面的可伪造。"""
+        self.users.set_password('admin', self.PW)
+        for _ in range(3):
+            self.call(self.admin_port, 'POST', '/api/login',
+                      body=json.dumps({'username': 'admin', 'password': 'bad'}),
+                      headers_extra={'X-Forwarded-For': '1.2.3.4, 9.9.9.9'})
+        # 锁定的是最后一跳 9.9.9.9；伪造的 1.2.3.4 不该被锁
+        self.assertGreater(self.throttle.check('9.9.9.9', 'admin'), 0)
+        self.assertEqual(self.throttle.check('1.2.3.4', 'admin'), 0)
+
 
 
 if __name__ == '__main__':

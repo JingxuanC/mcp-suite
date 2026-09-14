@@ -18,11 +18,15 @@ quota-platform — MCP 调用统一配额管控平台（sidecar proxy，零第�
 """
 
 import argparse
+import base64
+import binascii
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
+import secrets
 import sqlite3
 import sys
 import threading
@@ -74,6 +78,12 @@ DEFAULT_CONFIG = {
     'data_plane': {'host': '0.0.0.0', 'port': 3200},
     'admin_plane': {'host': '0.0.0.0', 'port': 3300},
     'admin_token': 'change-me',                # 管理面访问令牌
+    # ── 管理台账号登录（推荐；令牌保留给脚本与应急）──
+    'admin_users_path': '',                    # 管理员账号文件，默认与 config.json 同目录
+    'admin_session_ttl': 43200,                # 会话最长有效期（秒，默认 12h）
+    'admin_session_idle': 1800,                # 空闲超时（秒，默认 30min）
+    'admin_login_max_fails': 5,                # 连续失败多少次锁 IP/账号
+    'admin_login_lock_seconds': 900,           # 锁定时长（秒）
     'mcp_settings_path': '/mnt/mcp_settings.json',  # 只读挂载 mcphub 的配置文件
     'log_retention_days': 30,                  # 调用流水保留天数（启动时 + 每小时清理）
     'groups': {                                # 路由路径段 → 套餐档
@@ -148,6 +158,299 @@ class Config:
             json.dump(raw, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self.path)
         self.reload(force=True)
+
+
+# ---------------------------------------------------------------- 管理员账号 / 会话
+#
+# 为什么不再靠「复制管理令牌」：
+#   · 令牌是**静态共享秘密**，粘进浏览器 localStorage 后无法区分谁在用，也无法
+#     单独吊销——换人、离职、怀疑泄漏只能全量换令牌，所有自动化脚本一起挂。
+#   · 无法审计：日志里只知道"带着令牌的人"，不知道"谁"。
+# 改账号口令后：
+#   · 口令只以 scrypt 哈希落盘（不可逆），每个管理员一个账号；
+#   · 登录换取**短期会话**（默认 12h 上限 + 30min 空闲过期），可单独吊销；
+#   · 失败限流（按 IP 与按 IP+账号双维度），在线猜口令不可行；
+#   · 会话带 username，后续配额改动能追到人。
+# 旧的 X-Admin-Token **继续可用**（脚本 / 应急后门），人类入口只走登录。
+
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 16384, 8, 1
+SCRYPT_MAXMEM = 64 * 1024 * 1024
+PW_MIN_LEN = 10
+SESSION_COOKIE = 'qp_session'
+
+
+def _b64e(b):
+    return base64.b64encode(b).decode('ascii')
+
+
+def hash_password(password, *, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P):
+    """→ ``scrypt$n$r$p$<b64salt>$<b64hash>``。
+
+    scrypt 是内存硬函数，抗 GPU/ASIC 离线爆破（PBKDF2 在同等校验耗时下弱得多）。
+    只存哈希，永不落明文，也不做可逆加密。
+    """
+    if not isinstance(password, str) or len(password) < PW_MIN_LEN:
+        raise ValueError('口令至少 %d 位' % PW_MIN_LEN)
+    salt = os.urandom(16)
+    dk = hashlib.scrypt(password.encode('utf-8'), salt=salt, n=n, r=r, p=p,
+                        dklen=32, maxmem=SCRYPT_MAXMEM)
+    return 'scrypt$%d$%d$%d$%s$%s' % (n, r, p, _b64e(salt), _b64e(dk))
+
+
+def verify_password(password, stored):
+    """常量时间校验。格式非法 / 口令为空一律 False（fail-closed）。"""
+    if not password or not isinstance(stored, str):
+        return False
+    try:
+        algo, n, r, p, salt_b64, hash_b64 = stored.split('$')
+        if algo != 'scrypt':
+            return False
+        salt = base64.b64decode(salt_b64, validate=True)
+        want = base64.b64decode(hash_b64, validate=True)
+        dk = hashlib.scrypt(password.encode('utf-8'), salt=salt,
+                            n=int(n), r=int(r), p=int(p), dklen=len(want),
+                            maxmem=SCRYPT_MAXMEM)
+    except (ValueError, TypeError, binascii.Error, MemoryError):
+        return False
+    return hmac.compare_digest(dk, want)
+
+
+class AdminUsers:
+    """``admin_users.json``（权限 0600）热加载。文件不存在 = 未启用账号登录。"""
+
+    def __init__(self, path):
+        self.path = path
+        self._lock = threading.Lock()
+        self._mtime = 0
+        self._users = {}
+
+    def reload(self, force=False):
+        try:
+            mtime = os.stat(self.path).st_mtime
+        except OSError:
+            mtime = 0
+        if not force and mtime == self._mtime:
+            return
+        users = {}
+        try:
+            with open(self.path, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            for u in (raw.get('users') or []):
+                name = str(u.get('username') or '').strip()
+                if name and u.get('hash'):
+                    users[name] = {'hash': str(u['hash']),
+                                   'disabled': bool(u.get('disabled')),
+                                   'created_at': u.get('created_at')}
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+            users = {}
+        with self._lock:
+            self._users = users
+            self._mtime = mtime
+
+    def current(self):
+        try:
+            mtime = os.stat(self.path).st_mtime
+        except OSError:
+            mtime = 0
+        if mtime != self._mtime:
+            self.reload()
+        with self._lock:
+            return dict(self._users)
+
+    @property
+    def configured(self):
+        return bool(self.current())
+
+    def names(self):
+        return sorted(self.current())
+
+    def verify(self, username, password):
+        u = self.current().get(str(username or '').strip())
+        if not u or u.get('disabled'):
+            # 账号不存在也跑一次 scrypt：否则响应时间快慢会变成账号枚举侧信道
+            verify_password(password or 'x', _DUMMY_HASH)
+            return False
+        return verify_password(password, u['hash'])
+
+    def set_password(self, username, password):
+        """新增或重置口令（先算哈希，口令太短直接抛 ValueError）。"""
+        name = str(username or '').strip()
+        if not name:
+            raise ValueError('用户名不能为空')
+        digest = hash_password(password)
+        with self._lock:
+            try:
+                with open(self.path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                if not isinstance(raw, dict):
+                    raw = {}
+            except (OSError, json.JSONDecodeError):
+                raw = {}
+            users = [u for u in (raw.get('users') or [])
+                     if str((u or {}).get('username') or '').strip() != name]
+            users.append({'username': name, 'hash': digest, 'disabled': False,
+                          'created_at': int(time.time())})
+            raw['users'] = users
+            self._write_raw(raw)
+        self.reload(force=True)
+
+    def set_disabled(self, username, disabled):
+        name = str(username or '').strip()
+        with self._lock:
+            try:
+                with open(self.path, 'r', encoding='utf-8') as f:
+                    raw = json.load(f)
+                if not isinstance(raw, dict):
+                    raw = {}
+            except (OSError, json.JSONDecodeError):
+                raw = {}
+            hit = False
+            for u in (raw.get('users') or []):
+                if str((u or {}).get('username') or '').strip() == name:
+                    u['disabled'] = bool(disabled)
+                    hit = True
+            if not hit:
+                return False
+            self._write_raw(raw)
+        self.reload(force=True)
+        return True
+
+    def _write_raw(self, raw):
+        d = os.path.dirname(os.path.abspath(self.path)) or '.'
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        tmp = self.path + '.tmp'
+        # 0600：口令哈希与 config.json 里的 admin_token 同级敏感，不能让同机
+        # 其他用户读到（离线爆破的入口）。
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(raw, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+        os.replace(tmp, self.path)
+        try:
+            os.chmod(self.path, 0o600)
+        except OSError:
+            pass
+
+
+class SessionStore:
+    """内存会话表：重启即失效（管理员重新登录，可接受，换来零持久化状态）。"""
+
+    def __init__(self, ttl=43200, idle=1800):
+        self.ttl = int(ttl)
+        self.idle = int(idle)
+        self._lock = threading.Lock()
+        self._s = {}
+
+    def create(self, username, ip='', method='password'):
+        sid = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._lock:
+            self._gc(now)
+            self._s[sid] = {'username': username, 'ip': ip, 'method': method,
+                            'created_at': now, 'last_seen': now}
+        return sid
+
+    def touch(self, sid):
+        """→ 会话副本（并刷新 last_seen）；过期或不存在 → None。"""
+        if not sid:
+            return None
+        now = time.time()
+        with self._lock:
+            self._gc(now)
+            s = self._s.get(sid)
+            if not s:
+                return None
+            s['last_seen'] = now
+            return dict(s)
+
+    def destroy(self, sid):
+        if not sid:
+            return False
+        with self._lock:
+            return self._s.pop(sid, None) is not None
+
+    def destroy_user(self, username, keep_sid=None):
+        """吊销某账号的全部会话（改口令后调用），本会话除外。"""
+        with self._lock:
+            n = 0
+            for sid in [k for k, v in self._s.items()
+                        if v['username'] == username and k != keep_sid]:
+                self._s.pop(sid, None)
+                n += 1
+        return n
+
+    def _gc(self, now):
+        for sid in [k for k, v in self._s.items()
+                    if now - v['created_at'] > self.ttl
+                    or now - v['last_seen'] > self.idle]:
+            self._s.pop(sid, None)
+
+    def count(self):
+        with self._lock:
+            self._gc(time.time())
+            return len(self._s)
+
+
+class LoginThrottle:
+    """登录失败限流：按 IP、按 (IP, 账号) 两个维度计数，锁定期内直接拒绝。
+
+    内存实现、重启清零。目标不是对抗大规模分布式爆破（那要靠 nginx limit_req
+    / fail2ban），而是让**在线猜口令**不可行。
+    """
+
+    def __init__(self, max_fails=5, lock_seconds=900):
+        self.max_fails = max(1, int(max_fails))
+        self.lock_seconds = max(1, int(lock_seconds))
+        self._lock = threading.Lock()
+        self._fails = {}   # key -> [count, first_fail_ts, locked_until]
+
+    def check(self, ip, username):
+        """→ 还需等待的秒数（0 = 允许尝试）。
+
+        必须**向上取整**：``int()`` 截断会让锁定最后 1 秒返回 0，而调用方用
+        ``if wait:`` 判断是否拒绝 —— 那 1 秒内限流等于被绕过。
+        """
+        now = time.time()
+        with self._lock:
+            worst = 0.0
+            for k in (('ip', ip), ('user', ip, username)):
+                e = self._fails.get(k)
+                if e and e[2] > now:
+                    worst = max(worst, e[2] - now)
+            return math.ceil(worst)
+
+    def fail(self, ip, username):
+        now = time.time()
+        with self._lock:
+            for k in (('ip', ip), ('user', ip, username)):
+                e = self._fails.get(k)
+                # 距上次失败过久 → 重新计数（避免几周前的 1 次失败累积到锁定）
+                if not e or now - e[1] > self.lock_seconds * 4:
+                    e = [0, now, 0.0]
+                e[0] += 1
+                e[1] = now
+                if e[0] >= self.max_fails:
+                    e[2] = now + self.lock_seconds
+                    e[0] = 0
+                self._fails[k] = e
+
+    def succeed(self, ip, username):
+        """登录成功 → 清掉该 IP 与账号的失败计数。
+
+        必须连 per-IP 一起清：某 IP 上的失败计数可能来自其他账号的错口令，若只清
+        per-user 键，同一出口 IP（办公室 NAT）的合法管理员会被别人的失败连坐锁死，
+        而且**口令正确也解不开**（检查在验证之前）。
+        """
+        with self._lock:
+            self._fails.pop(('user', ip, username), None)
+            self._fails.pop(('ip', ip), None)
+
+
+# 账号不存在时用来对齐耗时的哑哈希（scrypt 参数与真实账号一致）
+_DUMMY_HASH = hash_password('dummy-password-for-timing')
 
 
 # ---------------------------------------------------------------- key 库存
@@ -723,28 +1026,229 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     server_version = 'quota-platform/0.1'
 
-    def _json(self, status, obj):
+    def _json(self, status, obj, extra_headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(body)))
+        for k, v in (extra_headers or ()):
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
-    def _authed(self):
+    # ── 依赖装配（惰性） ────────────────────────────────────────
+    # 管理面依赖 users/sessions/throttle。宿主（main()）会注入，但测试或
+    # 其他嵌入方式可能只装配了 cfg/store/inventory —— 这里按需补默认实例，
+    # 避免因为少挂一个属性就 AttributeError 崩掉整个管理面。
+
+    @property
+    def _sessions(self):
+        s = getattr(self.server, 'sessions', None)
+        if s is None:
+            cfg = self.server.cfg.current()
+            s = SessionStore(ttl=cfg.get('admin_session_ttl') or 43200,
+                             idle=cfg.get('admin_session_idle') or 1800)
+            self.server.sessions = s
+        return s
+
+    @property
+    def _users(self):
+        u = getattr(self.server, 'users', None)
+        if u is None:
+            base = os.path.dirname(os.path.abspath(getattr(self.server.cfg, 'path', '.') or '.'))
+            cfg = self.server.cfg.current()
+            u = AdminUsers(cfg.get('admin_users_path') or
+                           os.path.join(base, 'admin_users.json'))
+            self.server.users = u
+        return u
+
+    @property
+    def _throttle(self):
+        t = getattr(self.server, 'throttle', None)
+        if t is None:
+            cfg = self.server.cfg.current()
+            t = LoginThrottle(max_fails=cfg.get('admin_login_max_fails') or 5,
+                              lock_seconds=cfg.get('admin_login_lock_seconds') or 900)
+            self.server.throttle = t
+        return t
+
+    # ── 客户端信息 ──────────────────────────────────────────────
+
+    def _client_ip(self):
+        """真实客户端 IP。
+
+        nginx 用 ``$proxy_add_x_forwarded_for`` 把 ``$remote_addr`` **追加到末尾**，
+        因此客户端可以伪造前面几跳、伪造不了最后一跳 —— 只取最后一个才可信。
+        """
+        xff = self.headers.get('X-Forwarded-For', '')
+        if xff:
+            last = xff.split(',')[-1].strip()
+            if last:
+                return last
+        return (self.client_address or ('?', 0))[0]
+
+    def _cookie(self, name):
+        for part in self.headers.get('Cookie', '').split(';'):
+            k, _, v = part.strip().partition('=')
+            if k == name:
+                return v
+        return ''
+
+    def _cookie_path(self):
+        """会话 cookie 的 Path。
+
+        nginx 在 ``/quota/`` 上剥掉了前缀（``proxy_pass .../``），应用侧看不到
+        ``/quota``；靠 nginx 传的 ``X-Forwarded-Prefix`` 还原，这样会话 cookie
+        不会被浏览器发到 ``/hub/`` 的 MCP 调用上。直接访问 ``:3300`` 时无该头 → ``/``。
+        """
+        pfx = (self.headers.get('X-Forwarded-Prefix') or '').strip().rstrip('/')
+        return (pfx + '/') if pfx else '/'
+
+    def _session_cookie_header(self, sid, max_age):
+        secure = ''
+        if (self.headers.get('X-Forwarded-Proto') or '').lower() == 'https':
+            secure = '; Secure'
+        return ('%s=%s; Path=%s; Max-Age=%d; HttpOnly; SameSite=Strict%s'
+                % (SESSION_COOKIE, sid, self._cookie_path(), max_age, secure))
+
+    def _clear_cookie_header(self):
+        return ('%s=; Path=%s; Max-Age=0; HttpOnly; SameSite=Strict'
+                % (SESSION_COOKIE, self._cookie_path()))
+
+    # ── 鉴权 ────────────────────────────────────────────────────
+
+    def _session(self):
+        """→ ``(username, method, sid)``；无有效会话 → ``(None, None, None)``。"""
+        sid = self._cookie(SESSION_COOKIE)
+        if sid:
+            s = self._sessions.touch(sid)
+            if s:
+                return s['username'], 'session', sid
+        return None, None, None
+
+    def _token_ok(self):
         token = self.headers.get('X-Admin-Token', '')
         cfg = self.server.cfg.current()
-        ok = token and hmac.compare_digest(
+        return bool(token) and hmac.compare_digest(
             hashlib.sha256(token.encode()).digest(),
             hashlib.sha256(str(cfg.get('admin_token', '')).encode()).digest())
-        if not ok:
-            self._json(401, {'error': 'unauthorized'})
-        return ok
+
+    def _origin_ok(self):
+        """Cookie 鉴权下 POST 的纵深防御。
+
+        ``SameSite=Strict`` 已经让跨站请求带不上 cookie，这里再核对一次
+        Origin/Referer 的 host 是否等于 Host；非浏览器客户端不带这两个头，放行。
+        """
+        for h in ('Origin', 'Referer'):
+            v = self.headers.get(h)
+            if not v:
+                continue
+            return urlparse(v).netloc == (self.headers.get('Host') or '')
+        return True
+
+    def _authed(self, need_origin=True):
+        username, method, sid = self._session()
+        if username:
+            if need_origin and self.command == 'POST' and not self._origin_ok():
+                self._json(403, {'error': 'csrf_origin_mismatch',
+                                 'hint': 'Origin 与 Host 不一致，已拒绝'})
+                return False
+            return True
+        if self._token_ok():
+            return True
+        self._json(401, {'error': 'unauthorized',
+                         'hint': '先在管理台登录（POST /api/login），'
+                                 '或在脚本里带 X-Admin-Token 头'})
+        return False
+
+    def _read_json(self):
+        """→ dict；非法 JSON / 非对象 → None（调用方回 400）。"""
+        length = int(self.headers.get('Content-Length') or 0)
+        try:
+            obj = json.loads(self.rfile.read(length) or b'{}')
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return obj if isinstance(obj, dict) else None
+
+    def _me(self):
+        """登录状态探测（**不需要**鉴权）：管理台据此决定渲染登录页还是看板。"""
+        username, method, _ = self._session()
+        token = self._token_ok()
+        return self._json(200, {
+            'authenticated': bool(username) or token,
+            'username': username or ('token' if token else None),
+            'method': method or ('token' if token else None),
+            'users_configured': self._users.configured,
+            'active_sessions': self._sessions.count(),
+            'cookie_path': self._cookie_path(),
+        })
+
+    def _login(self):
+        ip = self._client_ip()
+        body = self._read_json()
+        if body is None:
+            return self._json(400, {'error': 'invalid_json'})
+        username = str(body.get('username') or '').strip()
+        password = body.get('password') or ''
+
+        wait = self._throttle.check(ip, username)
+        if wait:
+            return self._json(429, {'error': 'too_many_attempts', 'retry_after': wait,
+                                    'hint': '登录失败次数过多，请 %d 秒后重试' % wait})
+        if not username or not password:
+            return self._json(400, {'error': 'missing_credentials',
+                                    'hint': '需要 username 与 password'})
+        if not self._users.configured:
+            return self._json(503, {
+                'error': 'no_admin_users',
+                'hint': '尚未配置管理员账号。在服务器执行：'
+                        'python3 scripts/set_admin_password.py --username admin'})
+        if not self._users.verify(username, password):
+            self._throttle.fail(ip, username)
+            left = self._throttle.check(ip, username)
+            payload = {'error': 'bad_credentials', 'hint': '用户名或口令错误'}
+            if left:
+                payload['retry_after'] = left
+            return self._json(401, payload)
+
+        self._throttle.succeed(ip, username)
+        cfg = self.server.cfg.current()
+        ttl = int(cfg.get('admin_session_ttl') or 43200)
+        sid = self._sessions.create(username, ip=ip)
+        return self._json(200, {'ok': True, 'username': username, 'expires_in': ttl},
+                          extra_headers=[('Set-Cookie',
+                                          self._session_cookie_header(sid, ttl))])
+
+    def _logout(self):
+        _, _, sid = self._session()
+        self._sessions.destroy(sid)
+        return self._json(200, {'ok': True},
+                          extra_headers=[('Set-Cookie', self._clear_cookie_header())])
+
+    def _change_password(self):
+        username, method, sid = self._session()
+        if method != 'session':
+            return self._json(403, {'error': 'session_required',
+                                    'hint': '请用账号登录后再改口令（令牌会话不能改口令）'})
+        body = self._read_json()
+        if body is None:
+            return self._json(400, {'error': 'invalid_json'})
+        if not self._users.verify(username, body.get('old_password') or ''):
+            return self._json(401, {'error': 'bad_credentials', 'hint': '原口令不正确'})
+        try:
+            self._users.set_password(username, body.get('new_password') or '')
+        except ValueError as e:
+            return self._json(400, {'error': 'weak_password', 'hint': str(e)})
+        revoked = self._sessions.destroy_user(username, keep_sid=sid)
+        return self._json(200, {'ok': True, 'revoked_sessions': revoked,
+                                'hint': '已吊销该账号的其他会话'})
 
     def do_GET(self):
         path = self.path.split('?')[0]
         if path == '/healthz':
             return self._json(200, {'status': 'ok'})
+        if path == '/api/me':
+            return self._me()
         if path == '/' or path == '/index.html':
             return self._serve_html()
         if not self._authed():
@@ -811,9 +1315,16 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         })
 
     def do_POST(self):
+        path = self.path.split('?')[0]
+        # 登录/登出必须在鉴权之前
+        if path == '/api/login':
+            return self._login()
+        if path == '/api/logout':
+            return self._logout()
         if not self._authed():
             return
-        path = self.path.split('?')[0]
+        if path == '/api/password':
+            return self._change_password()
         if path == '/api/reload_inventory':
             self.server.inventory.reload()
             return self._json(200, {'ok': True, 'keys': len(self.server.inventory.all_masked())})
@@ -938,6 +1449,16 @@ def main():
     inventory = KeyInventory(cfg.current().get('mcp_settings_path', ''))
     inventory.reload()
 
+    # 管理员账号 / 会话 / 登录限流（只挂在管理面；数据面用不到）
+    users_path = (cfg.current().get('admin_users_path') or
+                  os.path.join(os.path.dirname(os.path.abspath(args.config)),
+                               'admin_users.json'))
+    users = AdminUsers(users_path)
+    sessions = SessionStore(ttl=cfg.current().get('admin_session_ttl') or 43200,
+                            idle=cfg.current().get('admin_session_idle') or 1800)
+    throttle = LoginThrottle(max_fails=cfg.current().get('admin_login_max_fails') or 5,
+                             lock_seconds=cfg.current().get('admin_login_lock_seconds') or 900)
+
     def prune_loop():
         while True:
             try:
@@ -962,12 +1483,14 @@ def main():
     data_srv.cfg, data_srv.store, data_srv.inventory = cfg, store, inventory
     admin_srv = ThreadingHTTPServer((acfg['host'], args.admin_port or acfg['port']), AdminPlaneHandler)
     admin_srv.cfg, admin_srv.store, admin_srv.inventory = cfg, store, inventory
+    admin_srv.users, admin_srv.sessions, admin_srv.throttle = users, sessions, throttle
 
     threading.Thread(target=data_srv.serve_forever, daemon=True).start()
     threading.Thread(target=admin_srv.serve_forever, daemon=True).start()
     print(f"[quota-platform] 数据面 :{data_srv.server_address[1]}  →  "
           f"{cfg.current()['upstream']}")
-    print(f"[quota-platform] 管理面 :{admin_srv.server_address[1]}")
+    print(f"[quota-platform] 管理面 :{admin_srv.server_address[1]}  "
+          f"(账号登录 {users_path}，已配置账号: {', '.join(users.names()) or '无 —— 运行 scripts/set_admin_password.py 创建'})")
     try:
         while True:
             time.sleep(3600)

@@ -31,7 +31,7 @@ locate() {
     else echo ""; fi
 }
 
-step "1/4 公共库副本漂移检查"
+step "1/5 公共库副本漂移检查"
 if out=$(python3 "$HERE/sync.py" --check 2>&1); then
     pass "$(echo "$out" | tail -1)"
 else
@@ -39,7 +39,7 @@ else
     fail "副本与 canonical 不一致 —— 先跑 python3 mcp-common/sync.py 并提交各服务仓库"
 fi
 
-step "2/4 语法与静态检查（未定义名 / 语法错误）"
+step "2/5 语法与静态检查（未定义名 / 语法错误）"
 python3 -c "import pyflakes" 2>/dev/null || {
     echo "  (pyflakes 未安装，只做 py_compile)"; }
 # 只拦真问题。pyflakes 的 "assigned to but never used"、"imported but unused"、
@@ -65,7 +65,7 @@ $hit"
     if [ -n "$bad" ]; then echo "$bad" | head -8; fail "$s 有静态问题"; else pass "$s"; fi
 done
 
-step "3/4 各服务单测"
+step "3/5 各服务单测"
 for s in "${SERVICES[@]}"; do
     d=$(locate "$s"); [ -z "$d" ] && continue
     tests=$(cd "$d" && ls test_*.py factor_miner/test_*.py 2>/dev/null)
@@ -77,7 +77,18 @@ for s in "${SERVICES[@]}"; do
     fi
 done
 
-step "4/4 公共库单测"
+step "4/5 管控层单测（quota-platform）"
+if [ -f "$ROOT/quota-platform/tests/test_quota.py" ]; then
+    if out=$(cd "$ROOT/quota-platform" && python3 -m pytest tests/test_quota.py -q --no-header 2>&1 | tail -1); then
+        pass "$out"
+    else
+        echo "    $out"; fail "quota-platform 测试失败"
+    fi
+else
+    echo "  - quota-platform 测试文件不存在"
+fi
+
+step "5/5 公共库单测"
 if out=$(python3 -m pytest "$HERE/test_mcp_common.py" -q --no-header 2>&1 | tail -1); then
     pass "$out"
 else

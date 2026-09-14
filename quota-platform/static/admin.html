@@ -93,13 +93,63 @@
   .logfilter input#lf_tool { width: 140px; }
   #kmsg, #kovmsg { color: var(--ok); font-size: 12px; }
   #kmsg.err, #kovmsg.err { color: var(--bad); }
+  /* ── 登录 / 账号 ── */
+  header .who { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); }
+  header .who b { color: var(--text); font-weight: 600; }
+  header .who button { background: #1a1f28; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; }
+  header .who button:hover { border-color: var(--accent, #4da3ff); }
+  #login-overlay {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    background: rgba(6, 8, 11, .88);
+    align-items: center; justify-content: center;
+  }
+  #login-overlay.show { display: flex; }
+  .login-card {
+    width: 340px; background: #0e1116; border: 1px solid var(--line);
+    border-radius: 12px; padding: 26px 24px; box-shadow: 0 18px 50px rgba(0,0,0,.5);
+  }
+  .login-card h2 { margin: 0 0 4px; font-size: 17px; }
+  .login-card p.sub2 { margin: 0 0 18px; font-size: 12px; color: var(--muted); }
+  .login-card label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 5px; }
+  .login-card input {
+    width: 100%; box-sizing: border-box; background: #0b0d11; color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 9px 10px; font: 13px var(--mono);
+  }
+  .login-card input:focus { outline: none; border-color: var(--accent, #4da3ff); }
+  .login-card button#login-btn {
+    width: 100%; margin-top: 18px; padding: 10px; border: 0; border-radius: 7px;
+    background: var(--accent, #4da3ff); color: #05070a; font-size: 13px; font-weight: 700; cursor: pointer;
+  }
+  .login-card button#login-btn:disabled { opacity: .55; cursor: default; }
+  #login-msg { min-height: 18px; margin-top: 12px; font-size: 12px; color: var(--bad); line-height: 1.5; }
+  #login-msg.ok { color: var(--ok); }
+  #login-help { margin-top: 14px; font-size: 11px; color: var(--muted); line-height: 1.6; display: none; }
+  #login-help code { background: #0b0d11; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-family: var(--mono); }
 </style>
 </head>
 <body>
+<!-- ── 登录浮层：未登录时挡住看板（后端本来也会 401，这里只是不让人看到空壳） ── -->
+<div id="login-overlay">
+  <form class="login-card" id="login-form">
+    <h2>quota-platform</h2>
+    <p class="sub2">配额管控台 · 请登录</p>
+    <label for="username">用户名</label>
+    <input id="username" name="username" autocomplete="username" />
+    <label for="password">口令</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" />
+    <button id="login-btn" type="submit">登录</button>
+    <div id="login-msg"></div>
+    <div id="login-help"></div>
+  </form>
+</div>
 <header>
   <h1>quota-platform <em>·</em> 配额管控台</h1>
   <span class="sub">MCP 调用统一计量 / 配额 / 分组定价</span>
-  <input id="token" type="password" placeholder="管理令牌 (X-Admin-Token)" />
+  <span class="who" id="who" style="display:none">
+    <span>已登录 <b id="who-name"></b></span>
+    <button type="button" id="btn-passwd">改口令</button>
+    <button type="button" id="btn-logout">退出</button>
+  </span>
 </header>
 <main>
   <!-- ============ 总览视图 ============ -->
@@ -282,10 +332,8 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const tokenInput = $('token');
-tokenInput.value = localStorage.getItem('qp_admin_token') || '';
-tokenInput.addEventListener('change', () => { localStorage.setItem('qp_admin_token', tokenInput.value); load(); });
 
+let whoami = null;        // {authenticated, username, method, users_configured}
 let currentKey = null;    // 非空 = 下钻视图
 let lastState = null;
 let cfgDirty = false;     // tiers/groups/heavy_tools 编辑器有未保存修改（15s 自动刷新时不重绘）
@@ -293,13 +341,145 @@ let kovDirty = false;     // key 覆盖编辑器同上
 let pendingFocus = null;  // 提额跳转：进入下钻后要聚焦的组名
 let lastKeyDetail = null; // 当前下钻 key 的详情（提额预填用）
 
+/* ---------------- 会话 ----------------
+   凭据是 HttpOnly cookie（qp_session），由 /api/login 种下、/api/logout 清掉。
+   JS 读不到也写不到它，因此 token 不会再出现在 localStorage（XSS 拿不走会话）。 */
 async function api(path, opts = {}) {
   // 相对路径：经 nginx /quota/ 反代时不能发 /api/* 绝对路径（会落到 location / 的官网）
-  const r = await fetch(path.replace(/^\//, ''), { ...opts, headers: { 'X-Admin-Token': tokenInput.value, ...(opts.headers || {}) } });
-  if (r.status === 401) { const e = new Error('管理令牌错误'); e.code = 401; throw e; }
-  if (!r.ok) { const t = await r.text().catch(() => ''); const e = new Error('HTTP ' + r.status + (t ? ' ' + t.slice(0, 120) : '')); e.code = r.status; throw e; }
+  const r = await fetch(path.replace(/^\//, ''), { ...opts, credentials: 'same-origin' });
+  if (r.status === 401) {
+    showLogin();
+    const e = new Error('登录已过期，请重新登录'); e.code = 401; throw e;
+  }
+  if (!r.ok) {
+    let msg = 'HTTP ' + r.status;
+    try { const j = await r.json(); msg = j.hint || j.error || msg; } catch (_) { /* 非 JSON */ }
+    const e = new Error(msg); e.code = r.status; throw e;
+  }
   return r.json();
 }
+
+function showLogin(msg) {
+  $('login-overlay').classList.add('show');
+  $('who').style.display = 'none';
+  if (msg) loginMsg(msg, true);
+  const u = $('username');
+  if (!u.value) u.value = localStorage.getItem('qp_last_user') || '';
+  ($('username').value ? $('password') : $('username')).focus();
+}
+
+function hideLogin() {
+  $('login-overlay').classList.remove('show');
+  whoami = whoami || {};
+  $('who').style.display = 'flex';
+  $('who-name').textContent = whoami.username
+    ? whoami.username + (whoami.method === 'token' ? '（令牌）' : '')
+    : '';
+}
+
+function loginMsg(text, isErr) {
+  const el = $('login-msg');
+  el.textContent = text || '';
+  el.classList.toggle('ok', !isErr);
+}
+
+function showLoginHelp(html) {
+  const el = $('login-help');
+  el.innerHTML = html || '';
+  el.style.display = html ? 'block' : 'none';
+}
+
+async function doLogin(ev) {
+  ev && ev.preventDefault();
+  const btn = $('login-btn');
+  const username = $('username').value.trim();
+  const password = $('password').value;
+  if (!username || !password) return loginMsg('请输入用户名与口令', true);
+  btn.disabled = true; loginMsg('登录中…');
+  try {
+    const r = await fetch('api/login', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (j.error === 'no_admin_users') {
+        showLoginHelp('尚未配置管理员账号。在服务器执行：<br><code>python3 scripts/set_admin_password.py --username admin</code>');
+        return loginMsg('系统还没有管理员账号', true);
+      }
+      if (j.error === 'too_many_attempts') return loginMsg(j.hint, true);
+      return loginMsg(j.hint || '登录失败', true);
+    }
+    localStorage.setItem('qp_last_user', username);
+    $('password').value = '';
+    showLoginHelp('');
+    loginMsg('登录成功，正在加载…', false);
+    whoami = { authenticated: true, username: j.username, method: 'session' };
+    hideLogin();
+    await load();
+    await loadLogs(true);
+    if (currentKey) loadKey(currentKey);
+  } catch (e) {
+    loginMsg('网络错误：' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doLogout() {
+  try { await fetch('api/logout', { method: 'POST', credentials: 'same-origin' }); } catch (_) { /* 忽略 */ }
+  whoami = null;
+  currentKey = null;
+  showLogin('已退出登录');
+}
+
+async function doChangePassword() {
+  const oldPw = window.prompt('请输入当前口令：');
+  if (oldPw === null) return;
+  const newPw = window.prompt('请输入新口令（至少 10 位）：');
+  if (newPw === null) return;
+  if (!newPw || newPw.length < 10) return window.alert('新口令至少 10 位');
+  try {
+    const r = await fetch('api/password', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return window.alert('改口令失败：' + (j.hint || j.error || ('HTTP ' + r.status)));
+    window.alert('口令已更新，该账号的其他会话已吊销。');
+  } catch (e) {
+    window.alert('改口令失败：' + e.message);
+  }
+}
+
+/* ---------------- 启动：先问后端"我是谁"，再决定渲染登录页还是看板 ---------------- */
+async function boot() {
+  $('login-form').addEventListener('submit', doLogin);
+  $('btn-logout').addEventListener('click', doLogout);
+  $('btn-passwd').addEventListener('click', doChangePassword);
+  try {
+    const r = await fetch('api/me', { credentials: 'same-origin' });
+    whoami = await r.json();
+  } catch (_) {
+    whoami = { authenticated: false, users_configured: true };
+  }
+  if (!whoami.authenticated) {
+    showLogin();
+    if (!whoami.users_configured) {
+      showLoginHelp('尚未配置管理员账号。在服务器执行：<br><code>python3 scripts/set_admin_password.py --username admin</code>');
+    }
+    return;
+  }
+  hideLogin();
+  await load();
+  await loadLogs(true);
+  setInterval(() => { if (!currentKey) load(); }, 15000);
+}
+
+boot();
+
 
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 // 内联事件参数：JSON.stringify 生成合法 JS 字符串，再经 esc 转义后可安全放入双引号属性
@@ -928,13 +1108,11 @@ async function clearExpiry() {
   } catch (e) { kmsg('操作失败：' + e.message, true); }
 }
 
-window.addEventListener('resize', () => { if (!currentKey && lastState) drawChart($('chart'), lastState.series_7d || [])); });
+window.addEventListener('resize', () => { if (!currentKey && lastState) drawChart($('chart'), lastState.series_7d || []); });
 
 ['lf_key', 'lf_tool'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') loadLogs(true); }));
 ['lf_group', 'lf_status'].forEach(id => $(id).addEventListener('change', () => loadLogs(true)));
 
-load();
-setInterval(load, 15000);
 </script>
 </body>
 </html>
