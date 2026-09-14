@@ -8,12 +8,20 @@ licenses/licenses.json
 mcphub/mcp_settings.json
 
 # 服务源码（各自独立仓库，按 README 克隆，不用 submodule）
-factor-miner-mcp/
-astock-data-mcp/
-global-data-mcp/
-causal-mcp/
-kronos-mcp/
-causal-memory-src/
+# 注意：本地这些是**指向 ~/project/<repo> 的符号链接**，而 `dir/`（带尾斜杠）
+# 只匹配目录、**不匹配符号链接** —— 规则会静默失效，`git add -A` 就会把符号链接
+# 本身当文件提交（内容是你的本机绝对路径）。所以这里一律不带尾斜杠。
+/factor-miner-mcp
+/astock-data-mcp
+/global-data-mcp
+/causal-mcp
+/kronos-mcp
+/causal-memory-src
+
+# 本地开发实例的运行数据（含 config.json 里的 admin_token，绝不入库）
+/quota-platform-data/
+# 本地开发用编排（含 ${ENV} 占位、无密钥；如要入库请用 git add -f 显式加回）
+/docker-compose.local.yml
 
 # 数据与运行产物
 usage/
