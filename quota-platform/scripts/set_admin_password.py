@@ -48,7 +48,10 @@ def main():
                     help='账号文件路径（默认 <config-dir>/admin_users.json）')
     ap.add_argument('--username', default='admin')
     ap.add_argument('--password', default=None,
-                    help='直接给口令（不推荐：会进 shell 历史；省略则交互输入）')
+                    help='直接给口令（不推荐：会进 shell 历史与 argv；省略则交互输入）')
+    ap.add_argument('--password-file', default=None, metavar='PATH',
+                    help='从文件读口令（首行，末尾换行会去掉）；PATH 用 - 表示 stdin。'
+                         '口令含特殊字符时的推荐方式，不进 shell 历史/argv')
     ap.add_argument('--disable', action='store_true', help='停用该账号（不设口令）')
     ap.add_argument('--list', action='store_true', help='只列出已有账号')
     args = ap.parse_args()
@@ -92,6 +95,20 @@ def main():
         return 0
 
     pw = args.password
+    if pw is None and args.password_file:
+        # 首行即口令，去掉行尾换行（echo 会带上）；不复用 --password 的 shell 展开
+        if args.password_file == '-':
+            pw = sys.stdin.readline().rstrip('\r\n')
+        else:
+            try:
+                with open(args.password_file, 'r', encoding='utf-8') as f:
+                    pw = f.readline().rstrip('\r\n')
+            except OSError as e:
+                print('✗ 读口令文件失败: %s' % e, file=sys.stderr)
+                return 1
+        if not pw:
+            print('✗ 口令文件为空', file=sys.stderr)
+            return 1
     if pw is None:
         pw = getpass.getpass('新口令（至少 %d 位，输入不回显）: ' % PW_MIN_LEN)
         again = getpass.getpass('再输一次: ')

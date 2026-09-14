@@ -20,6 +20,7 @@ quota-platform — MCP 调用统一配额管控平台（sidecar proxy，零第�
 import argparse
 import base64
 import binascii
+import http.client
 import hashlib
 import hmac
 import json
@@ -1009,7 +1010,10 @@ class DataPlaneHandler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, http.client.IncompleteRead):
+            # 客户端中途断开（SSE/长连接很常见）或上游 chunked 流未收尾就关闭。
+            # IncompleteRead 不是异常业务状态，只是对端没把流读完；按断开处理即可，
+            # 否则每条被掐断的流都会往日志里丢一段 traceback。
             pass
         finally:
             conn.close()
