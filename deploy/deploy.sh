@@ -42,14 +42,24 @@ free_gb() { df --output=avail -BG / | tail -1 | tr -dc '0-9'; }
 maybe_prune() {
     local why="$1" f
     f=$(free_gb)
-    if [ "$f" -lt "$MIN_FREE_GB" ]; then
-        warn "磁盘仅剩 ${f}G（<${MIN_FREE_GB}G），清理 build cache（${why}）"
-        docker builder prune -af >/dev/null 2>&1
-        docker image prune -f >/dev/null 2>&1
-        ok "清理后剩余 $(free_gb)G"
-    else
+    if [ "$f" -ge "$MIN_FREE_GB" ]; then
         ok "磁盘剩余 ${f}G，无需清理"
+        return
     fi
+    warn "磁盘仅剩 ${f}G（<${MIN_FREE_GB}G），清理（${why}）"
+    # 先清**悬空**镜像/容器：安全，完全不碰构建缓存
+    docker image prune -f >/dev/null 2>&1
+    docker container prune -f >/dev/null 2>&1
+    if [ "$(free_gb)" -lt "$MIN_FREE_GB" ]; then
+        # 还紧才动构建缓存，且**保留 3G**。
+        # 原写法 `builder prune -af` 会把 torch/pyqlib/mlflow 的缓存全部删掉
+        # → 下次重建必须重下约 2GB（实测一次重建被迫重下、耗 40 分钟以上）。
+        # 保留额度后，改代码类重建（Dockerfile 里 pip 层在 `COPY . .` 之前）
+        # 仍然秒级命中缓存。
+        warn "仍不足，压缩构建缓存（保留 3G）"
+        docker builder prune -f --keep-storage 3GB >/dev/null 2>&1
+    fi
+    ok "清理后剩余 $(free_gb)G"
 }
 
 # 目标服务
