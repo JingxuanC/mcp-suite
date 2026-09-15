@@ -103,6 +103,28 @@ services:
       - /opt/athena-mcp/licenses/licenses.json:/app/licenses/licenses.json:ro
       - /opt/mcp-suite/usage/kronos:/app/usage
 
+  workbench:
+    <<: *common
+    build:
+      context: ./workbench-mcp
+      args:
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    image: workbench-mcp:server
+    container_name: mcp-workbench
+    ports:
+      - "127.0.0.1:50062:50062"
+    environment:
+      TZ: Asia/Shanghai
+      WB_DB: /data/workbench.db
+      WB_H5: /data/daily_pv_all.h5
+      WB_START: "2024-01-01"
+      MCP_LICENSE_KEY: ${MCP_LICENSE_KEY:-}
+    volumes:
+      - /opt/quant-workbench/data:/data
+      - /opt/athena-mcp/data/factor_mining/daily_pv_all.h5:/data/daily_pv_all.h5:ro
+      - /opt/athena-mcp/qlib_data:/app/.qlib/qlib_data:ro
+      - /opt/mcp-suite/usage/workbench:/app/usage
+
   redis:
     image: redis:7-alpine
     container_name: redis

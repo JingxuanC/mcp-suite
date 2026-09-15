@@ -26,8 +26,9 @@ declare -A SVC_DIR=(
     [global-data]=global-data-mcp
     [causal]=causal-mcp
     [kronos]=kronos-mcp
+    [workbench]=workbench-mcp
 )
-ALL_SVC=(factor-miner astock-data global-data causal kronos)
+ALL_SVC=(factor-miner astock-data global-data causal kronos workbench)
 
 # 磁盘水位低于此值就先清 build cache（GB）
 MIN_FREE_GB=8
