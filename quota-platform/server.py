@@ -1577,6 +1577,12 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
 
     def _wb_call(self, tool, args):
         import urllib.request
+        # 人类专属工具（批准/否决/退役）必须带 human_token —— workbench 侧
+        # fail-closed 校验。approved_by/rejected_by 只是**改名**，不能当身份凭据
+        # （2026-09-15 修：此前公网任何人写 approved_by="hjx" 即可批准因子）。
+        args = dict(args or {})
+        if tool in ('wb_admit', 'wb_reject', 'wb_retire'):
+            args['human_token'] = os.environ.get('WB_HUMAN_TOKEN', '')
         body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
                            'params': {'name': tool, 'arguments': args}}).encode()
         req = urllib.request.Request(self.WB_BASE + '/mcp', data=body, method='POST')

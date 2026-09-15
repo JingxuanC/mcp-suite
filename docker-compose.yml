@@ -119,6 +119,9 @@ services:
       WB_H5: /data/daily_pv_all.h5
       WB_START: "2024-01-01"
       MCP_LICENSE_KEY: ${MCP_LICENSE_KEY:-}
+      # 人类专属工具（wb_admit/wb_reject/wb_retire）的身份凭据。未配置则这些
+      # 工具一律拒绝（fail-closed）—— 见 spine/server.py 的 _require_human_token。
+      WB_HUMAN_TOKEN: ${WB_HUMAN_TOKEN:?在 .env 里配置}
     volumes:
       - /opt/quant-workbench/data:/data
       - /opt/athena-mcp/data/factor_mining/daily_pv_all.h5:/data/daily_pv_all.h5:ro
@@ -157,6 +160,8 @@ services:
       WB_BASE: http://127.0.0.1:50062
       TZ: Asia/Shanghai
       QUOTA_ADMIN_TOKEN: ${QUOTA_ADMIN_TOKEN:?在 .env 里配置}
+      # 与 workbench 共享：_wb_call 转发 wb_admit/wb_reject/wb_retire 时注入
+      WB_HUMAN_TOKEN: ${WB_HUMAN_TOKEN:?在 .env 里配置}
       # API key 自助申请：建 key 用的 mcphub「system + all-access」key。
       # 用 :- 而非 :? —— 缺它只影响"审批建 key"这一功能（管理台会显式提示、
       # 审批接口返 502 带原因），不该让挡在全部 MCP 流量前的这一层起不来。
