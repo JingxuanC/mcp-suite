@@ -101,6 +101,40 @@ def register_group(cfg: dict, group: str, server: str, tools, description: str):
     return "updated", shown
 
 
+def grant_group(cfg: dict, group: str, key_names: list) -> list:
+    """把新分组授权给指定 bearer key。
+
+    这一步容易漏但**必需**：mcphub 的 key 有 `accessType`：
+      - "all"    → 所有分组通吃
+      - "groups" → 只认 `allowedGroups` 里列出的分组
+    一个 `accessType=groups` 的 key 去访问未授权的组，mcphub 会返回
+    **401 invalid_token**（而不是 403），日志里是
+    "Bearer key rejected due to scope restrictions" —— 很容易误判成 key 失效。
+    实测：同一个 key 访问 `data` 成功、访问新注册的 `gate` 401。
+
+    返回实际改动的 key 名列表。
+    """
+    touched = []
+    if not key_names:
+        return touched
+    want = {k.strip() for k in key_names if k.strip()}
+    for b in cfg.get("bearerKeys", []):
+        name = b.get("name")
+        if name not in want:
+            continue
+        if b.get("accessType") == "all":
+            touched.append("%s(已是 all，无需改动)" % name)
+            continue
+        ag = b.setdefault("allowedGroups", [])
+        if group not in ag:
+            ag.append(group)
+            touched.append(name)
+    missing = want - {b.get("name") for b in cfg.get("bearerKeys", [])}
+    if missing:
+        print("  ⚠️  未找到这些 key，未授权: %s" % sorted(missing))
+    return touched
+
+
 def sync_quota(path: Path, group: str, tier: str, heavy: list):
     """quota-platform：把分组加进 groups（决定计量档位），并把重工具登记。"""
     if not path.exists():
@@ -139,6 +173,9 @@ def main() -> int:
     ap.add_argument("--tools", default="all",
                     help='逗号分隔的工具名，或 "all"')
     ap.add_argument("--heavy", default="", help="逗号分隔的重工具名（计入 heavy 配额）")
+    ap.add_argument("--grant-key", default="",
+                    help="逗号分隔的 bearer key 名，把新分组授权给它们"
+                         "（accessType=groups 的 key 未授权访问会得到 401 而非 403）")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -153,10 +190,15 @@ def main() -> int:
     s_act = register_server(cfg, a.server, a.url, a.description or a.server, a.visibility)
     g_act, shown = register_group(cfg, a.group, a.server,
                                   tools, a.group_description or a.group)
+    print("================== 注册 summary ==================")
     print("server %-12s → %s" % (a.server, s_act))
     print("group  %-12s → %s" % (a.group, g_act))
     print("  暴露工具: %s" % (shown if shown == "all" else
                               "%d 个 %s" % (len(shown), shown)))
+    keys = [k.strip() for k in a.grant_key.split(",") if k.strip()]
+    granted = grant_group(cfg, a.group, keys)
+    if keys:
+        print("  授权 key: %s" % (granted or "（无改动）"))
     if a.dry_run:
         print("(dry-run，未写入)")
         return 0
