@@ -1,0 +1,48 @@
+# Apple Silicon 本地开发覆盖层
+#
+# 1) factor-miner 在 arm64 上现场构建要装 torch（~200MB wheel，实测单步 >25 分钟），
+#    改用已有镜像 factor-miner-mcp:latest —— 其依赖（tables/pandas/numpy/scipy）
+#    足够跑因子沙箱。
+#    ⚠️ 该镜像**没装 pyqlib** → factor_oos_check 的 qlib 回测在本地不可用
+#       （该路径已在远端环境验证过）。
+# 2) 把服务仓库源码挂到 /app：**改代码免重建**。依赖在 site-packages（/app 之外），
+#    挂载不会破坏环境。
+# 3) 清空容器内的 proxy 变量。Docker Desktop 的 ~/.docker/config.json 把
+#    httpProxy/httpsProxy 配成 `socks5://host.docker.internal:1097`，Docker 会
+#    把它注入**每个容器**；而 Python 的 urllib 不认识 socks5 scheme，报
+#    `<urlopen error unknown url type: socks5>`。A 股数据源（东财/腾讯）与本地
+#    服务都在国内，本来就不需要代理。
+#
+# 用法：
+#   docker compose -f docker-compose.local.yml -f docker-compose.local.override.yml \
+#       up -d --no-build redis factor-miner causal kronos astock-data
+x-noproxy: &noproxy
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  http_proxy: ""
+  https_proxy: ""
+  ALL_PROXY: ""
+  all_proxy: ""
+
+services:
+  factor-miner:
+    image: factor-miner-mcp:latest
+    volumes:
+      - ./factor-miner-mcp:/app
+    environment:
+      <<: *noproxy
+  astock-data:
+    volumes:
+      - ./astock-data-mcp:/app
+    environment:
+      <<: *noproxy
+  causal:
+    volumes:
+      - ./causal-mcp:/app
+    environment:
+      <<: *noproxy
+  kronos:
+    volumes:
+      - ./kronos-mcp:/app
+    environment:
+      <<: *noproxy

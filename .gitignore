@@ -32,3 +32,8 @@ crontab.bak.*
 causal-memory/cm-data-home/
 causal-memory/.auth-token
 causal-memory/Dockerfile
+
+# 本地运行数据与产物（h5 / qlib 数据 1GB+，或用容器生成的）
+/data
+/models
+/usage
