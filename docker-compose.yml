@@ -154,6 +154,7 @@ services:
     restart: unless-stopped
     network_mode: host   # 与 mcphub 同机：上游 127.0.0.1:3100；nginx 回源 127.0.0.1:3200/3300
     environment:
+      WB_BASE: http://127.0.0.1:50062
       TZ: Asia/Shanghai
       QUOTA_ADMIN_TOKEN: ${QUOTA_ADMIN_TOKEN:?在 .env 里配置}
       # API key 自助申请：建 key 用的 mcphub「system + all-access」key。
