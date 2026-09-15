@@ -1572,6 +1572,63 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         return self._json(200, {'ok': True},
                           extra_headers=[('Set-Cookie', self._clear_cookie_header())])
 
+    # ── 因子升格：服务端代调 workbench-mcp（浏览器不直连，避免绕开登录）──
+    WB_BASE = os.environ.get('WB_BASE', 'http://workbench:50062')
+
+    def _wb_call(self, tool, args):
+        import urllib.request
+        body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                           'params': {'name': tool, 'arguments': args}}).encode()
+        req = urllib.request.Request(self.WB_BASE + '/mcp', data=body, method='POST')
+        req.add_header('Content-Type', 'application/json')
+        req.add_header('Accept', 'application/json, text/event-stream')
+        raw = urllib.request.urlopen(req, timeout=20).read().decode()
+        for line in raw.splitlines():
+            if line.startswith('data: '):
+                raw = line[6:]
+                break
+        r = json.loads(raw)
+        txt = ''.join(c.get('text', '') for c in (r.get('result') or {}).get('content') or [])
+        return json.loads(txt) if txt else {}
+
+    def _wb_pending(self):
+        import urllib.request
+        try:
+            raw = urllib.request.urlopen(self.WB_BASE + '/api/report', timeout=20).read().decode()
+            d = json.loads(raw)
+        except Exception as e:  # noqa: BLE001
+            return self._json(200, {'ok': False, 'error': 'workbench 不可达: %s' % e,
+                                    'pending': [], 'recent': []})
+        return self._json(200, {'ok': True, 'pending': d.get('pending') or [],
+                                'recent': d.get('recent') or []})
+
+    def _wb_decide(self):
+        n = int(self.headers.get('Content-Length') or 0)
+        try:
+            body = json.loads(self.rfile.read(n) or b'{}')
+        except ValueError:
+            return self._json(400, {'ok': False, 'error': 'bad json'})
+        username, _, _ = self._session()
+        action = body.get('action')
+        try:
+            if action == 'admit':
+                r = self._wb_call('wb_admit', {'factor_id': body['factor_id'],
+                                               'eval_run_id': body['eval_run_id'],
+                                               'approved_by': username,
+                                               'note': body.get('note', '')})
+            elif action == 'reject':
+                r = self._wb_call('wb_reject', {'factor_id': body['factor_id'],
+                                                'eval_run_id': body['eval_run_id'],
+                                                'rejected_by': username,
+                                                'reason': body.get('reason', '')})
+            else:
+                return self._json(400, {'ok': False, 'error': 'action must be admit|reject'})
+        except Exception as e:  # noqa: BLE001
+            return self._json(200, {'ok': False, 'error': '%s: %s' % (type(e).__name__, e)})
+        if isinstance(r, dict) and r.get('error'):
+            return self._json(200, {'ok': False, 'error': r['error']})
+        return self._json(200, {'ok': True, 'by': username, 'action': action, 'result': r})
+
     def _change_password(self):
         username, method, sid = self._session()
         if method != 'session':
@@ -1611,6 +1668,8 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return
         if path == '/api/requests':
             return self._requests_list()
+        if path == '/api/wb/pending':          # 因子升格：闸门待批
+            return self._wb_pending()
         m = re.fullmatch(r'/api/requests/(\d+)/token', path)
         if m:
             return self._request_token(int(m.group(1)))
@@ -1700,6 +1759,8 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return {'approve': self._request_approve,
                     'reject': self._request_reject,
                     'reissue': self._request_reissue}[m.group(2)](int(m.group(1)))
+        if path == '/api/wb/decide':           # 因子升格：批准 / 否决
+            return self._wb_decide()
         if path == '/api/password':
             return self._change_password()
         if path == '/api/reload_inventory':

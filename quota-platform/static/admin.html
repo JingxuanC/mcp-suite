@@ -368,6 +368,17 @@
       </div>
     </section>
   </div>
+
+    <section id="sec_wb">
+      <div class="hdr">
+        <h2>因子升格（闸门待批）</h2>
+        <button class="ghost sml" onclick="loadWbPending()">刷新</button>
+      </div>
+      <p class="dim" style="font-size:12px;margin:4px 0 10px">
+        批准只能在这里做（服务端已登录校验后调 wb_admit）。判据是闸门给的数字，不是感觉。
+      </p>
+      <div id="wb_pending"></div>
+    </section>
 </main>
 <footer>quota-platform · 数据面 :3200 → mcphub :3100 · 管理面 :3300 · 仅标准库实现</footer>
 
@@ -1311,6 +1322,38 @@ window.addEventListener('resize', () => { if (!currentKey && lastState) drawChar
 ['lf_key', 'lf_tool'].forEach(id => $(id).addEventListener('keydown', e => { if (e.key === 'Enter') loadLogs(true); }));
 ['lf_group', 'lf_status'].forEach(id => $(id).addEventListener('change', () => loadLogs(true)));
 
+
+async function loadWbPending(){
+  const el=document.getElementById('wb_pending'); if(!el) return;
+  const f=(v,n)=> (v===null||v===undefined||isNaN(v))?'—':Number(v).toFixed(n);
+  const E=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  let d=null; try{ d=await api('/api/wb/pending'); }catch(e){}
+  if(!d||!d.ok){ el.innerHTML='<div class="dim">workbench 不可达'+(d&&d.error?': '+E(d.error):'')+'</div>'; return; }
+  const rows=d.pending||[];
+  if(!rows.length){ el.innerHTML='<div class="dim">待批为空 —— 空的是对的：闸门到现在否决了所有候选。</div>'; return; }
+  let h='<table class="reqtable"><thead><tr><th>因子</th><th>假设与机制</th>'
+      +'<th class="num">net_ic</th><th class="num">t_excess</th><th class="num">换手/年</th>'
+      +'<th class="num">净超额/年</th><th>操作</th></tr></thead><tbody>';
+  for(const r of rows){
+    h+='<tr><td>'+E(r.name||'')+'<div class="dim">#'+r.factor_id+'</div></td>'
+      +'<td>'+E(r.text||'—')+'<div class="dim">'+E(r.mechanism||'')+'</div></td>'
+      +'<td class="num">'+f(r.net_ic,3)+'</td><td class="num">'+f(r.t_excess,2)+'</td>'
+      +'<td class="num">'+f(r.turnover_annual,1)+'</td>'
+      +'<td class="num">'+f(r.net_excess_annual*100,2)+'%</td>'
+      +'<td style="white-space:nowrap"><button class="sml" onclick="wbDecide('+r.factor_id+','+r.eval_run_id+',\'admit\')">批准</button> '
+      +'<button class="ghost sml" onclick="wbDecide('+r.factor_id+','+r.eval_run_id+',\'reject\')">否决</button></td></tr>';
+  }
+  el.innerHTML=h+'</tbody></table>';
+}
+async function wbDecide(fid,eid,action){
+  const reason=prompt((action==='admit'?'批准':'否决')+' 因子 #'+fid+'（可填理由，写入台账）','');
+  if(reason===null) return;
+  const r=await api('/api/wb/decide',{method:'POST',
+    body:JSON.stringify({factor_id:fid,eval_run_id:eid,action:action,note:reason,reason:reason})});
+  if(!r||!r.ok){ alert('失败: '+((r&&r.error)||'unknown')); return; }
+  loadWbPending();
+}
+setTimeout(loadWbPending, 1000);
 </script>
 </body>
 </html>
