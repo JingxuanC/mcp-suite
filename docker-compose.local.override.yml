@@ -3,8 +3,18 @@
 # 1) factor-miner 在 arm64 上现场构建要装 torch（~200MB wheel，实测单步 >25 分钟），
 #    改用已有镜像 factor-miner-mcp:latest —— 其依赖（tables/pandas/numpy/scipy）
 #    足够跑因子沙箱。
-#    ⚠️ 该镜像**没装 pyqlib** → factor_oos_check 的 qlib 回测在本地不可用
-#       （该路径已在远端环境验证过）。
+#    ⚠️ 该镜像没装 pyqlib → factor_oos_check 的 qlib 回测在本地不可用。
+#       这里原本写的是"该路径已在远端环境验证过"——**是错的**，2026-09-18 实测更正：
+#       远端 amd64 上 factor_oos_check 至今**没有成功过一次**，日志 6/6 全失败：
+#         22:11/22:19  missing 2 required positional arguments: 'code' and 'name'
+#         22:50/22:52  mining-window backtest failed: mom5: new factor failed / qrun exit -9
+#         01:05/01:07  reversal_20_remote: qrun exit -9；mem_probe: new factor failed
+#       qrun exit -9 = 内核 OOM kill（qrun 子进程只上 RLIMIT_FSIZE，注释见
+#       factor_backtest.py:458）。远端 mem_limit=1536m 而常态占用已 ~874MiB，
+#       且 README 自己写着全量 daily_pv_all.h5 读入峰值就 ~0.9GB RSS。
+#       → 这是"内存上限 vs 全量回测需求"的取舍，不是缺依赖。上限的由来见
+#       /opt/mcp-suite/docker-compose.override.yml 的注释（2026-09-16 单容器
+#       拖垮整机的事故）。要跑通得抬 factor-miner 的上限，且应先测出真实峰值。
 # 2) 把服务仓库源码挂到 /app：**改代码免重建**。依赖在 site-packages（/app 之外），
 #    挂载不会破坏环境。
 # 3) 清空容器内的 proxy 变量。Docker Desktop 的 ~/.docker/config.json 把
