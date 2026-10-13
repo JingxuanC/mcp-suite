@@ -37,3 +37,12 @@ causal-memory/Dockerfile
 /data
 /models
 /usage
+
+/workbench-mcp
+/causal-memory-bin
+
+# 手工备份与 Python 缓存
+*.bak
+*.bak-*
+*.bak.*
+__pycache__/

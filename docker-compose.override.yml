@@ -1,0 +1,37 @@
+# 单机 7.3G 同时承载 hub 与 LangAlpha。此前没有任何 per-container 上限，
+# 所以单个容器失控就能把整机拖进 swap 抖动（2026-09-16 事故）。
+#
+# 每个上限约为常态用量的 3 倍：正常负载不会被误杀，但失控进程会被 OOM
+# 杀死，而不是拖垮整台机器。memswap_limit == mem_limit 是关键——它禁止
+# 该容器动用 swap，让"杀掉一个容器"胜过"全机换页卡死"。
+services:
+  kronos:
+    mem_limit: 1536m
+    memswap_limit: 1536m
+  factor-miner:
+    mem_limit: 1536m
+    memswap_limit: 1536m
+  workbench:
+    mem_limit: 768m
+    memswap_limit: 768m
+  mcphub:
+    mem_limit: 768m
+    memswap_limit: 768m
+  causal:
+    mem_limit: 512m
+    memswap_limit: 512m
+  global-data:
+    mem_limit: 512m
+    memswap_limit: 512m
+  astock-data:
+    mem_limit: 384m
+    memswap_limit: 384m
+  causal-memory:
+    mem_limit: 384m
+    memswap_limit: 384m
+  quota-platform:
+    mem_limit: 384m
+    memswap_limit: 384m
+  redis:
+    mem_limit: 384m
+    memswap_limit: 384m
