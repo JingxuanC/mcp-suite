@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -901,7 +902,7 @@ class KeyRequestFlowTest(unittest.TestCase):
         self.srv.mcphub = qp.McphubAdmin(self.cfg.current()['mcphub_api_base'],
                                          'good-admin-key')
         self.srv.pending = qp.PendingTokens(ttl_seconds=3600)
-        self.srv.apply_limiter = qp.ApplyRateLimiter(per_hour=2, per_day=5)
+        self.srv.apply_limiter = qp.ApplyRateLimiter(per_hour=100, per_day=100)
         self.srv.users = qp.AdminUsers(os.path.join(self.root, 'u.json'))
         self.srv.sessions = qp.SessionStore()
         self.srv.throttle = qp.LoginThrottle()
@@ -1043,10 +1044,13 @@ class KeyRequestFlowTest(unittest.TestCase):
             s, _ = self.call(method, path, {} if method == 'POST' else None)
             self.assertEqual(s, 401, '%s %s 应当 401' % (method, path))
 
-    def _apply(self, name='客户甲', groups=('data', 'alpha')):
-        s, b = self.call('POST', '/api/apply', {'name': name, 'contact': 'a@b.c',
-                                                'purpose': '测试', 'groups': list(groups)})
-        self.assertEqual(s, 200)
+    def _apply(self, name='客户甲', groups=('data', 'alpha'), purpose='测试', product=None):
+        body = {'name': name, 'contact': 'a@b.c', 'purpose': purpose,
+                'groups': list(groups)}
+        if product is not None:
+            body['product'] = product
+        s, b = self.call('POST', '/api/apply', body)
+        self.assertEqual(s, 200, b)
         return b['req_no'], b['id']
 
     def test_full_flow_approve_pickup_wipe(self):
@@ -1147,6 +1151,188 @@ class KeyRequestFlowTest(unittest.TestCase):
         s, b = self.call('GET', '/api/apply/meta')
         self.assertEqual(s, 200)
         self.assertTrue(b['groups'])
+
+    # ── product 与 request_events（时间线）──────────────────────────────
+
+    def test_apply_product_inference_validation_and_public_status(self):
+        # purpose 里含 Alpha Desk（大小写不敏感）→ 自动识别为 alpha-desk
+        req_no, _ = self._apply(purpose='Alpha Desk 因子研究')
+        s, b = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(s, 200)
+        self.assertEqual(b['product'], 'alpha-desk')
+
+        # 显式 product 覆盖 purpose 推断
+        req_no, _ = self._apply(purpose='Alpha Desk', product='api')
+        s, b = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(b['product'], 'api')
+
+        req_no, _ = self._apply(purpose='普通接入', product='alpha-desk')
+        s, b = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(b['product'], 'alpha-desk')
+
+        # 未提供且无法推断 → api
+        req_no, _ = self._apply(purpose='普通接入')
+        s, b = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(b['product'], 'api')
+
+        # 非法值直接拒绝，不建单
+        s, b = self.call('POST', '/api/apply', {
+            'name': 'x', 'contact': 'y', 'groups': ['data'], 'product': 'enterprise'})
+        self.assertEqual((s, b['error']), (400, 'unknown_product'))
+
+    def test_list_requests_serializes_product_and_events(self):
+        req_no, rid = self._apply(purpose='Alpha Desk 研究')
+        s, b = self.call('GET', '/api/requests', headers=self.ADMIN)
+        self.assertEqual(s, 200)
+        row = [r for r in b['requests'] if r['id'] == rid][0]
+        self.assertEqual(row['product'], 'alpha-desk')
+        # 向后兼容：原有字段一个不少
+        for key in ('req_no', 'name', 'status', 'want_groups', 'granted_groups',
+                    'created_at', 'decided_at', 'picked_at', 'token_pending',
+                    'token_age_sec', 'mc_key_name'):
+            self.assertIn(key, row)
+        self.assertIsInstance(row['events'], list)
+        self.assertEqual([e['kind'] for e in row['events']], ['submitted'])
+        self.assertEqual(row['events'][0]['actor'], 'applicant')
+
+    def test_events_for_approve_and_pickup(self):
+        req_no, rid = self._apply(purpose='Alpha Desk 研究')
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid,
+                         {'groups': ['alpha'], 'tier': 'paid'}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
+        self.assertEqual(s, 200)
+        self.assertTrue(b['token'].startswith('mcphub_'))
+
+        s, b = self.call('GET', '/api/requests', headers=self.ADMIN)
+        row = [r for r in b['requests'] if r['id'] == rid][0]
+        kinds = [e['kind'] for e in row['events']]
+        self.assertEqual(kinds, ['picked-up', 'approved', 'submitted'])  # 最新在前
+        by_kind = {e['kind']: e for e in row['events']}
+        self.assertEqual(by_kind['submitted']['actor'], 'applicant')
+        self.assertEqual(by_kind['picked-up']['actor'], 'applicant')
+        self.assertEqual(by_kind['approved']['actor'], 'token')
+        self.assertIn('groups=alpha', by_kind['approved']['detail'])
+        # 事件里绝不出现 token
+        self.assertNotIn('mcphub_', json.dumps(row['events'], ensure_ascii=False))
+
+    def test_events_for_reject(self):
+        req_no, rid = self._apply()
+        s, b = self.call('POST', '/api/requests/%d/reject' % rid,
+                         {'reason': '用途不明确'}, self.ADMIN)
+        self.assertEqual(s, 200)
+        s, b = self.call('GET', '/api/requests', headers=self.ADMIN)
+        row = [r for r in b['requests'] if r['id'] == rid][0]
+        kinds = [e['kind'] for e in row['events']]
+        self.assertEqual(kinds, ['rejected', 'submitted'])
+        self.assertEqual(row['events'][0]['detail'], '用途不明确')
+        self.assertEqual(row['events'][0]['actor'], 'token')
+
+    def test_events_for_reissue(self):
+        req_no, rid = self._apply()
+        self.call('POST', '/api/requests/%d/approve' % rid,
+                  {'groups': ['data']}, self.ADMIN)
+        s, b = self.call('POST', '/api/requests/%d/reissue' % rid,
+                         {'groups': ['alpha']}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        s, b = self.call('GET', '/api/requests', headers=self.ADMIN)
+        row = [r for r in b['requests'] if r['id'] == rid][0]
+        kinds = [e['kind'] for e in row['events']]
+        self.assertEqual(kinds, ['reissued', 'approved', 'submitted'])
+        self.assertIn('groups=alpha', row['events'][0]['detail'])
+        self.assertNotIn('mcphub_', json.dumps(row['events'], ensure_ascii=False))
+
+
+LEGACY_KEY_REQUESTS = """
+CREATE TABLE key_requests (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  req_no         TEXT NOT NULL UNIQUE,
+  name           TEXT NOT NULL,
+  contact        TEXT NOT NULL DEFAULT '',
+  purpose        TEXT NOT NULL DEFAULT '',
+  want_groups    TEXT NOT NULL DEFAULT '[]',
+  volume         TEXT NOT NULL DEFAULT '',
+  status         TEXT NOT NULL,
+  created_at     INTEGER NOT NULL,
+  decided_at     INTEGER,
+  decided_by     TEXT NOT NULL DEFAULT '',
+  reject_reason  TEXT NOT NULL DEFAULT '',
+  mc_key_id      TEXT NOT NULL DEFAULT '',
+  mc_key_name    TEXT NOT NULL DEFAULT '',
+  granted_groups TEXT NOT NULL DEFAULT '[]',
+  picked_at      INTEGER,
+  client_ip      TEXT NOT NULL DEFAULT ''
+);
+"""
+
+
+class RequestProductStoreTest(unittest.TestCase):
+    """product 列的就地迁移/回填，以及 Store 层的读写与事件顺序。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = os.path.join(self.tmp.name, 'q.db')
+
+    def _legacy_db(self):
+        conn = sqlite3.connect(self.db)
+        conn.executescript(LEGACY_KEY_REQUESTS)
+        now = int(time.time())
+        rows = [
+            ('REQ-AAAAAAAA', '甲', 'Alpha Desk 因子研究', 'pending', now),
+            ('REQ-BBBBBBBB', '乙', 'we need an ALPHA DESK key', 'pending', now),
+            ('REQ-CCCCCCCC', '丙', '普通 API 接入', 'pending', now),
+        ]
+        conn.executemany(
+            'INSERT INTO key_requests(req_no,name,purpose,status,created_at) '
+            'VALUES(?,?,?,?,?)', rows)
+        conn.commit()
+        conn.close()
+
+    def test_legacy_db_migrates_product_and_backfills(self):
+        self._legacy_db()
+        store = qp.QuotaStore(self.db)
+        got = {r['req_no']: r['product'] for r in store.list_requests()}
+        self.assertEqual(got['REQ-AAAAAAAA'], 'alpha-desk')
+        self.assertEqual(got['REQ-BBBBBBBB'], 'alpha-desk')   # 大小写不敏感
+        self.assertEqual(got['REQ-CCCCCCCC'], 'api')
+        # 列真的存在（不是只在 Python 层兜底）
+        conn = sqlite3.connect(self.db)
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(key_requests)').fetchall()}
+        conn.close()
+        self.assertIn('product', cols)
+        # 再次启动幂等
+        store2 = qp.QuotaStore(self.db)
+        self.assertEqual(store2.get_request(req_no='REQ-CCCCCCCC')['product'], 'api')
+
+    def test_create_request_preserves_and_exposes_product(self):
+        store = qp.QuotaStore(self.db)
+        rid = store.create_request('REQ-DDDDDDDD', '甲', 'c', 'Alpha Desk 研究',
+                                   ['alpha'], '1', '127.0.0.1')
+        self.assertEqual(store.get_request(req_id=rid)['product'], 'alpha-desk')
+        rid2 = store.create_request('REQ-EEEEEEEE', '乙', 'c', 'Alpha Desk',
+                                    ['alpha'], '1', product='api')
+        self.assertEqual(store.get_request(req_id=rid2)['product'], 'api')
+        rid3 = store.create_request('REQ-FFFFFFFF', '丙', 'c', '普通', ['data'], '')
+        self.assertEqual(store.get_request(req_id=rid3)['product'], 'api')
+        listed = {r['req_no']: r['product'] for r in store.list_requests()}
+        self.assertEqual(listed['REQ-DDDDDDDD'], 'alpha-desk')
+        self.assertEqual(listed['REQ-EEEEEEEE'], 'api')
+        self.assertEqual(listed['REQ-FFFFFFFF'], 'api')
+
+    def test_events_newest_first_capped_and_bulk(self):
+        store = qp.QuotaStore(self.db)
+        rid = store.create_request('REQ-GGGGGGGG', '甲', 'c', 'x', ['data'], '')
+        for i in range(55):
+            store.add_event(rid, 'e%02d' % i, actor='tester', detail='d%d' % i)
+        evs = store.request_events(rid)
+        self.assertEqual(len(evs), 50)                       # 每单最多 50 条
+        self.assertEqual(evs[0]['kind'], 'e54')              # 最新在前
+        self.assertEqual(evs[-1]['kind'], 'e05')
+        self.assertEqual(set(evs[0]), {'id', 'ts', 'actor', 'kind', 'detail'})
+        bulk = store.events_for_requests([rid], limit=3)
+        self.assertEqual([e['kind'] for e in bulk[rid]], ['e54', 'e53', 'e52'])
+        self.assertEqual(store.events_for_requests([]), {})
 
 
 if __name__ == '__main__':
