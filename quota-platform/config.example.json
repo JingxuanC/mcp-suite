@@ -36,6 +36,9 @@
     },
     "memory": {
       "tier": "paid"
+    },
+    "global": {
+      "tier": "free"
     }
   },
   "tiers": {
