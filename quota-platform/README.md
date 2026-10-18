@@ -35,13 +35,13 @@ python3 scripts/set_admin_password.py --list             # 看有哪些账号
 python3 scripts/set_admin_password.py --username ops --disable
 ```
 
-跑测试：`python -m unittest discover -s tests -v`（114 个用例，另见 `scripts/e2e_apply_flow.py`）
+跑测试：`python -m unittest discover -s tests -v`（116 个用例，另见 `scripts/e2e_apply_flow.py`）
 
 ## 管控模型
 
 | 概念 | 说明 |
 |---|---|
-| **分组（group）** | 由请求路径识别：`/{group}/messages` 等，路径任一段命中 `groups` 配置即归入该组；全局路由归 `global`。生产分组：`data`(免费) / `alpha`(付费: 因子+回测) / `memory` |
+| **分组（group）** | 由请求路径识别：`/{group}/messages` 等，路径任一段命中 `groups` 配置即归入该组；全局路由归 `global`。生产分组：`data` / `global`（免费数据） / `alpha`（付费: 因子+回测） / `memory` |
 | **档位（tier）** | 每组一个档：`daily` / `monthly` / `heavy_daily`（null = 不限） |
 | **重度工具** | `heavy_tools` 名单内的 `tools/call` 单独计重度配额，给回测/深度研究这类贵工具单独限次 |
 | **key 覆盖** | `key_overrides` 按 key 名对指定组覆盖额度（如 CI 机器人给高额度） |
