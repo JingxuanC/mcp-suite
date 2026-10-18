@@ -137,6 +137,7 @@ DEFAULT_CONFIG = {
     'log_retention_days': 30,                  # 调用流水保留天数（启动时 + 每小时清理）
     'groups': {                                # 路由路径段 → 套餐档
         'data': {'tier': 'free'},
+        'global': {'tier': 'free'},
         'alpha': {'tier': 'paid'},
     },
     'tiers': {
@@ -2142,6 +2143,12 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         entry = dict(overrides.get(key_name) or {})
         tbg = dict(entry.get('tier_by_group') or {})
         for g in groups:
+            # 免费分组（data / global）的额度由分组档位决定，审批不能把
+            # 1,000,000/day 的 free 额度覆盖成 2,000/day 的 paid 额度。
+            # 付费分组（alpha / memory / gate）仍按审批选的档位写覆盖。
+            group_tier = ((cfg.get('groups') or {}).get(g) or {}).get('tier', 'default')
+            if group_tier == 'free':
+                continue
             tbg[g] = limits
         entry['tier_by_group'] = tbg
         overrides[key_name] = entry
