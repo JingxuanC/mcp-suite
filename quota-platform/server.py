@@ -142,8 +142,8 @@ DEFAULT_CONFIG = {
     },
     'tiers': {
         'free':    {'daily': 1000000, 'monthly': 30000000, 'heavy_daily': None},
-        'paid':    {'daily': 2000,    'monthly': 40000,    'heavy_daily': 200},
-        'default': {'daily': 500,     'monthly': 5000,     'heavy_daily': 50},
+        'paid':    {'daily': 2000,    'monthly': 60000,    'heavy_daily': 50},
+        'default': {'daily': 500,     'monthly': 15000,    'heavy_daily': 50},
     },
     'key_overrides': {},                       # 按 key 名覆盖：{"bot-a": {"tier_by_group": {"alpha": {...}}}}
     # 重度工具名单（与 mcp-suite 各服务 ASYNC_TOOLS 对齐）
