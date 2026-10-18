@@ -887,8 +887,8 @@ class KeyRequestFlowTest(unittest.TestCase):
                 'admin_token': 'legacy-ok',
                 'mcp_settings_path': os.path.join(self.root, 'none.json'),
                 'mcphub_api_base': 'http://127.0.0.1:%d/hub/api' % self.mock_port,
-                'groups': {'data': {'tier': 'free'}, 'alpha': {'tier': 'paid'},
-                           'memory': {'tier': 'paid'}},
+                'groups': {'data': {'tier': 'free'}, 'global': {'tier': 'free'},
+                           'alpha': {'tier': 'paid'}, 'memory': {'tier': 'paid'}},
                 'tiers': {'free': {'daily': 1000, 'monthly': 9999, 'heavy_daily': None},
                           'paid': {'daily': 200, 'monthly': 4000, 'heavy_daily': 20}},
                 'apply_groups': ['data', 'alpha', 'memory'],
@@ -1066,8 +1066,9 @@ class KeyRequestFlowTest(unittest.TestCase):
         # 收窄授权 + 档位写入
         post = [c for c in MockMcphubKeys.calls if c[0] == 'POST'][-1][2]
         self.assertEqual(post['allowedGroups'], ['data'])
-        self.assertEqual(
-            self.cfg.current()['key_overrides'][key_name]['tier_by_group']['data']['daily'], 1000)
+        # data 是 free 分组：审批不应把 1,000,000/day 覆盖成付费档位
+        self.assertNotIn('data', self.cfg.current()['key_overrides'][key_name].get('tier_by_group', {}))
+        self.assertEqual(qp.resolve_limits(self.cfg.current(), key_name, 'data')['daily'], 1000)
 
         s, b = self.call('GET', '/api/apply/' + req_no)
         self.assertTrue(b['claimable'])
@@ -1153,6 +1154,18 @@ class KeyRequestFlowTest(unittest.TestCase):
         self.assertTrue(b['groups'])
 
     # ── product 与 request_events（时间线）──────────────────────────────
+
+    def test_approval_keeps_free_groups_free_and_overrides_paid(self):
+        req_no, rid = self._apply(groups=('data', 'alpha'))
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid,
+                         {'groups': ['data', 'alpha'], 'tier': 'paid'}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        key_name = b['key_name']
+        tbg = self.cfg.current()['key_overrides'][key_name]['tier_by_group']
+        self.assertNotIn('data', tbg)
+        self.assertEqual(tbg['alpha']['daily'], 200)
+        self.assertEqual(qp.resolve_limits(self.cfg.current(), key_name, 'data')['daily'], 1000)
+        self.assertEqual(qp.resolve_limits(self.cfg.current(), key_name, 'alpha')['daily'], 200)
 
     def test_apply_product_inference_validation_and_public_status(self):
         # purpose 里含 Alpha Desk（大小写不敏感）→ 自动识别为 alpha-desk
@@ -1319,6 +1332,33 @@ class RequestProductStoreTest(unittest.TestCase):
         self.assertEqual(listed['REQ-DDDDDDDD'], 'alpha-desk')
         self.assertEqual(listed['REQ-EEEEEEEE'], 'api')
         self.assertEqual(listed['REQ-FFFFFFFF'], 'api')
+
+    def test_cleanup_removes_only_exact_paid_overrides_on_free_groups(self):
+        import importlib.util
+        from pathlib import Path as _Path
+        script = _Path(__file__).resolve().parents[1] / "scripts" / "cleanup_quota_overrides.py"
+        spec = importlib.util.spec_from_file_location("cleanup_quota_overrides", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        cfg = {
+            "groups": {"data": {"tier": "free"}, "global": {"tier": "free"},
+                       "alpha": {"tier": "paid"}},
+            "tiers": {"paid": {"daily": 2000, "monthly": 40000, "heavy_daily": 200}},
+            "key_overrides": {
+                "auto": {"tier_by_group": {"data": {"daily": 2000, "monthly": 40000, "heavy_daily": 200},
+                                            "alpha": {"daily": 2000, "monthly": 40000, "heavy_daily": 200}}},
+                "custom": {"tier_by_group": {"data": {"daily": 20000, "monthly": 399990, "heavy_daily": 200}}},
+                "disabled": {"disabled": True,
+                             "tier_by_group": {"global": {"daily": 2000, "monthly": 40000, "heavy_daily": 200}}},
+            },
+        }
+        out, msgs = mod.clean_overrides(cfg, "paid")
+        self.assertNotIn("data", out["key_overrides"]["auto"]["tier_by_group"])
+        self.assertIn("alpha", out["key_overrides"]["auto"]["tier_by_group"])
+        self.assertIn("data", out["key_overrides"]["custom"]["tier_by_group"])
+        self.assertNotIn("global", out["key_overrides"]["disabled"].get("tier_by_group", {}))
+        self.assertTrue(out["key_overrides"]["disabled"]["disabled"])
+        self.assertEqual(len(msgs), 2)
 
     def test_events_newest_first_capped_and_bulk(self):
         store = qp.QuotaStore(self.db)
