@@ -135,6 +135,105 @@
   .reqtable .ap-box { background: #0b0d11; border: 1px solid var(--ok); border-radius: 6px;
                       padding: 8px; font-family: var(--mono); font-size: 12px;
                       word-break: break-all; margin: 6px 0; }
+
+  /* ================= 申请审批工作台 ================= */
+  .req-shell { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 14px; align-items: start; }
+  .req-pane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; min-width: 0; }
+  .req-pane-head { display: flex; align-items: center; gap: 10px; padding: 14px 15px 10px; border-bottom: 1px solid var(--line); }
+  .req-pane-head h2 { padding: 0; margin: 0; border: 0; flex: 1; font-size: 14px; }
+  .req-pane-head .pill { margin-left: 2px; }
+  .req-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
+  .req-stat { background: var(--panel); padding: 10px 12px; }
+  .req-stat b { display: block; font: 600 18px/1.2 var(--mono); }
+  .req-stat span { display: block; color: var(--dim); font-size: 10.5px; margin-top: 3px; }
+  .req-stat.hot b { color: var(--accent); }
+  .req-stat.ok b { color: var(--ok); }
+  .req-tabs { display: flex; gap: 4px; padding: 10px 12px 0; flex-wrap: wrap; }
+  .req-tab { background: transparent; color: var(--dim); border: 1px solid transparent; border-radius: 99px; padding: 4px 9px; font-size: 11.5px; font-weight: 500; }
+  .req-tab b { font-family: var(--mono); font-weight: 600; margin-left: 3px; }
+  .req-tab:hover { color: var(--text); background: #0b0d11; }
+  .req-tab.on { color: var(--accent); border-color: var(--accent); background: rgba(232,176,75,.08); }
+  .req-filters { display: grid; grid-template-columns: 1fr 88px; gap: 7px; padding: 9px 12px 8px; }
+  .req-filters input, .req-filters select {
+    width: 100%; box-sizing: border-box; background: #0b0d11; color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 11.5px var(--mono);
+  }
+  .req-filters input:focus, .req-filters select:focus { outline: none; border-color: var(--accent); }
+  .req-filters .wide { grid-column: 1 / -1; }
+  .req-list { max-height: 690px; overflow: auto; }
+  .req-card {
+    display: block; width: 100%; box-sizing: border-box; text-align: left; margin: 0;
+    padding: 10px 14px 11px; border: 0; border-bottom: 1px solid var(--line);
+    border-left: 3px solid transparent; background: transparent; color: var(--text);
+    font: inherit; cursor: pointer;
+  }
+  .req-card:hover { background: #1b1f27; }
+  .req-card.on { background: #1d232d; border-left-color: var(--accent); }
+  .req-card-top { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+  .req-product { font-size: 10px; font-weight: 700; letter-spacing: .2px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--dim); }
+  .req-product.alpha { color: #6ab0ff; border-color: #3d6f9f; background: rgba(77,163,255,.08); }
+  .req-product.api { color: var(--dim); }
+  .req-card-top .req-status { margin-left: auto; }
+  .req-card-name { font-size: 12.5px; font-weight: 600; line-height: 1.35; }
+  .req-card-name .req-id { color: var(--dim); font: 10.5px var(--mono); font-weight: 400; margin-left: 5px; }
+  .req-card-purpose { color: var(--dim); font-size: 11px; line-height: 1.45; margin-top: 2px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .req-card-meta { color: #6f7786; font-size: 10.5px; margin-top: 5px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .req-empty { padding: 34px 18px; text-align: center; color: var(--dim); font-size: 12px; line-height: 1.7; }
+  .req-empty b { color: var(--text); display: block; margin-bottom: 3px; }
+  .req-detail { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 17px 19px 20px; min-height: 440px; min-width: 0; }
+  .req-detail-empty { padding: 70px 20px; text-align: center; color: var(--dim); font-size: 12px; line-height: 1.7; }
+  .req-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .req-detail-head .req-id { margin-left: auto; color: var(--dim); font: 11px var(--mono); }
+  .req-detail h3 { margin: 12px 0 1px; font-size: 18px; line-height: 1.3; }
+  .req-detail .req-contact { color: var(--dim); font-size: 11.5px; }
+  .req-detail .req-purpose { margin-top: 12px; padding: 9px 11px; border-radius: 7px; background: #0b0d11; border: 1px solid var(--line); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .req-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 12px; background: var(--line); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .req-field { background: var(--panel); padding: 8px 10px; min-width: 0; }
+  .req-field .k { color: var(--dim); font-size: 10px; margin-bottom: 2px; }
+  .req-field .v { font-size: 12px; word-break: break-word; }
+  .req-section { border-top: 1px solid var(--line); margin-top: 15px; padding-top: 13px; }
+  .req-section-title { font-size: 11px; color: var(--dim); letter-spacing: .5px; margin-bottom: 8px; display: flex; gap: 8px; align-items: center; }
+  .req-section-title b { color: var(--text); font-size: 12px; letter-spacing: 0; }
+  .req-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 9px; }
+  .req-preset { background: #0b0d11; color: var(--dim); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font-size: 11px; }
+  .req-preset:hover { color: var(--text); border-color: var(--accent); }
+  .req-preset.on { color: var(--accent); border-color: var(--accent); background: rgba(232,176,75,.07); }
+  .req-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .req-group { display: flex; align-items: flex-start; gap: 8px; padding: 8px 9px; border: 1px solid var(--line); border-radius: 7px; background: #0b0d11; cursor: pointer; }
+  .req-group.on { border-color: var(--accent); background: rgba(232,176,75,.05); }
+  .req-group input { margin: 2px 0 0; accent-color: var(--accent); }
+  .req-group b { display: block; font-size: 11.5px; font-weight: 600; }
+  .req-group small { display: block; color: var(--dim); font: 10px var(--mono); margin-top: 1px; }
+  .req-tier { display: flex; align-items: center; gap: 8px; margin-top: 9px; font-size: 11.5px; color: var(--dim); }
+  .req-tier select { background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: 11.5px var(--mono); }
+  .req-summary { margin-top: 10px; padding: 8px 10px; border-left: 2px solid var(--accent); background: rgba(232,176,75,.06); color: var(--text); font-size: 11.5px; line-height: 1.55; border-radius: 0 6px 6px 0; }
+  .req-summary b { color: var(--accent); }
+  .req-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 11px; }
+  .req-primary { background: var(--accent); color: #14100a; border: 0; border-radius: 6px; padding: 7px 14px; font-size: 12px; font-weight: 700; }
+  .req-primary:disabled { opacity: .55; }
+  .req-danger { background: transparent; color: var(--bad); border: 1px solid var(--bad); border-radius: 6px; padding: 6px 11px; font-size: 11.5px; }
+  .req-ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); border-radius: 6px; padding: 6px 11px; font-size: 11.5px; }
+  .req-ghost:hover { color: var(--text); border-color: var(--accent); }
+  .req-link { color: #6ab0ff; font-size: 11.5px; text-decoration: none; border-bottom: 1px dashed #3d6f9f; cursor: pointer; }
+  .req-link:hover { color: #9bcaff; }
+  .req-reason { width: 100%; box-sizing: border-box; min-height: 58px; resize: vertical; background: #0b0d11; color: var(--text); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; font: 12px/1.5 inherit; }
+  .req-reason:focus { outline: none; border-color: var(--bad); }
+  .req-reasons { display: flex; gap: 5px; flex-wrap: wrap; margin: 7px 0; }
+  .req-reasons button { background: transparent; color: var(--dim); border: 1px solid var(--line); border-radius: 99px; padding: 2px 8px; font-size: 10.5px; }
+  .req-reasons button:hover { color: var(--text); border-color: var(--dim); }
+  .req-token { margin-top: 8px; padding: 9px; border: 1px solid var(--ok); border-radius: 7px; background: #0b0d11; }
+  .req-token pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; color: var(--text); font: 11px/1.5 var(--mono); }
+  .req-token .warn { color: var(--accent); font-size: 10.5px; margin-top: 5px; }
+  #req_toast { position: fixed; right: 22px; bottom: 22px; z-index: 300; max-width: 440px; padding: 10px 14px; border-radius: 8px; background: #10141b; border: 1px solid var(--ok); color: var(--text); font-size: 12px; line-height: 1.45; box-shadow: 0 12px 40px rgba(0,0,0,.45); opacity: 0; transform: translateY(10px); pointer-events: none; transition: .18s; }
+  #req_toast.show { opacity: 1; transform: none; }
+  #req_toast.err { border-color: var(--bad); }
+  @media (max-width: 900px) {
+    .req-shell { grid-template-columns: 1fr; }
+    .req-list { max-height: 360px; }
+    .req-detail { min-height: 0; }
+    .req-grid, .req-groups { grid-template-columns: 1fr; }
+  }
+
 </style>
 </head>
 <body>
@@ -180,29 +279,44 @@
 
     <!-- ============ API key 申请审批 ============ -->
     <section id="sec-requests">
-      <h2>API key 申请审批 <span class="pill blocked" id="req_badge" style="display:none"></span></h2>
-      <div class="btnrow" style="margin:0 0 10px">
-        <button class="ghost sml" onclick="loadRequests()">刷新</button>
-        <select id="req_filter" onchange="loadRequests()">
-          <option value="">全部</option>
-          <option value="pending" selected>待审批</option>
-          <option value="approved">已通过</option>
-          <option value="rejected">已拒绝</option>
-        </select>
-        <span class="muted" id="req_hint"></span>
+      <div class="req-shell">
+        <div class="req-pane">
+          <div class="req-pane-head">
+            <h2>申请审批 <span class="pill blocked" id="req_badge" style="display:none"></span></h2>
+            <button class="ghost sml" type="button" onclick="loadRequests()">刷新</button>
+          </div>
+          <div class="req-stats">
+            <div class="req-stat hot"><b id="req_pending_count">–</b><span>待审批</span></div>
+            <div class="req-stat ok"><b id="req_claimable_count">–</b><span>待领取</span></div>
+            <div class="req-stat"><b id="req_approved_count">–</b><span>已通过</span></div>
+            <div class="req-stat"><b id="req_rejected_count">–</b><span>已拒绝</span></div>
+          </div>
+          <div class="req-tabs" id="req_tabs">
+            <button type="button" class="req-tab on" data-status="pending" onclick="setReqStatus('pending')">待审批 <b id="cnt_pending">0</b></button>
+            <button type="button" class="req-tab" data-status="approved" onclick="setReqStatus('approved')">已通过 <b id="cnt_approved">0</b></button>
+            <button type="button" class="req-tab" data-status="rejected" onclick="setReqStatus('rejected')">已拒绝 <b id="cnt_rejected">0</b></button>
+            <button type="button" class="req-tab" data-status="all" onclick="setReqStatus('all')">全部 <b id="cnt_all">0</b></button>
+          </div>
+          <div class="req-filters">
+            <input id="req_search" type="search" placeholder="搜单号 / 称呼 / 联系方式 / 用途" oninput="onReqSearch(this.value)" spellcheck="false">
+            <select id="req_product" onchange="setReqProduct(this.value)">
+              <option value="all">全部产品</option>
+              <option value="alpha">Alpha Desk</option>
+              <option value="api">API Key</option>
+            </select>
+            <select id="req_sort" class="wide" onchange="setReqSort(this.value)">
+              <option value="new">最新提交优先</option>
+              <option value="old">最早提交优先</option>
+            </select>
+          </div>
+          <div class="muted" id="req_hint" style="padding:0 13px 9px;font-size:10.5px;line-height:1.5"></div>
+          <div class="req-list" id="req_list"></div>
+        </div>
+        <div class="req-detail" id="req_detail"></div>
       </div>
-      <div class="tbl-wrap">
-        <table class="reqtable">
-          <thead><tr>
-            <th>申请单号</th><th>称呼</th><th>联系方式</th><th>申请分组</th>
-            <th>提交时间</th><th>状态</th><th>操作</th>
-          </tr></thead>
-          <tbody id="req_rows"></tbody>
-        </table>
-      </div>
-      <p class="muted" style="font-size:12px;margin-top:8px">
+      <p class="muted" style="font-size:11px;margin-top:9px">
         通过后会自动到 mcphub 建一把<b>收窄到勾选分组</b>的密钥，并把配额档位写入 key_overrides。
-        申请人凭单号在 <a href="https://causal-memory.com/apply" target="_blank" rel="noopener">申请页</a> 自助领取（只能领一次，取走即从内存抹除）。
+        申请人凭单号在对应领取页自助领取（只能领一次，取走即从内存抹除）。
       </p>
     </section>
 
@@ -609,7 +723,7 @@ async function load() {
     badge.style.display = 'none';
   }
   // 审批表单打开时不重绘（否则 15s 自动刷新会把勾选状态冲掉）
-  if (!window.AP_OPEN) loadRequests();
+  if (!window.AP_OPEN && !window.REQ_BUSY && !document.activeElement?.closest('#sec-requests')) loadRequests();
 
   drawChart($('chart'), d.series_7d || []);
 
@@ -969,29 +1083,27 @@ function backToMain() {
   load();
 }
 
-/* ---------------- API key 申请审批 ----------------
-   通过 = 调 mcphub 建一把「收窄到勾选分组」的 key + 写配额档位。
-   明文 token 只在服务端内存里等申请人领取（取走即抹）；这里「查看密钥」是
-   管理员的人工转发兜底 —— 申请人领不到时可以直接复制给他。 */
+/* ---------------- 申请审批工作台 ----------------
+   左列表 + 右详情：详情里完成分组/档位选择、通过、拒绝、改发和查看待领取 token。
+   仍然只调用现有的 /api/requests* 接口，不改服务端数据模型。 */
 let REQ_CACHE = [];
 let REQ_META = { groups: [], tiers: [], default_tier: 'paid' };
-
-async function loadRequests() {
-  try {
-    const q = $('req_filter').value;
-    const d = await api('/api/requests' + (q ? '?status=' + encodeURIComponent(q) : ''));
-    REQ_CACHE = d.requests || [];
-    REQ_META = { groups: d.apply_groups || [], tiers: d.tiers || [],
-                 default_tier: d.default_tier || 'paid' };
-    if (typeof d.pending_count === 'number') $('pending_reqs').textContent = fmt(d.pending_count);
-    if (typeof d.claimable_count === 'number') $('claimable_tokens').textContent = fmt(d.claimable_count);
-    $('req_hint').textContent = REQ_META.groups.length
-      ? '' : '（未配置 apply_groups，需在 config.json 里指定可申请分组）';
-    renderRequests();
-  } catch (e) {
-    $('req_rows').innerHTML = `<tr><td colspan="7" class="muted">加载失败：${esc(e.message)}</td></tr>`;
-  }
-}
+let REQ_LABELS = {
+  data: '行情 / 资讯数据',
+  alpha: '因子 · 回测 · 因果',
+  memory: '因果记忆',
+};
+let REQ_LABELS_READY = false;
+let REQ_SELECTED_ID = null;
+let REQ_STATUS_FILTER = 'pending';
+let REQ_PRODUCT_FILTER = 'all';
+let REQ_QUERY = '';
+let REQ_SORT = 'new';
+let REQ_DRAFT = null;
+let REQ_TOKEN = null;
+let REQ_REISSUE = false;
+let REQ_SEARCH_TIMER = null;
+window.REQ_BUSY = false;
 
 const REQ_STATUS = {
   pending: ['blocked', '待审批'],
@@ -1000,114 +1112,462 @@ const REQ_STATUS = {
   revoked: ['blocked', '已停用'],
 };
 
-function renderRequests() {
-  const tb = $('req_rows');
-  if (!REQ_CACHE.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="muted">暂无申请</td></tr>';
+const TIER_LABEL = { free: 'free（免费）', paid: 'paid（付费）', heavy: 'heavy（重度）' };
+
+function reqProduct(r) {
+  return String(r.purpose || '').toLowerCase().includes('alpha desk') ? 'alpha' : 'api';
+}
+function reqGroups(r) {
+  return (r.granted_groups && r.granted_groups.length ? r.granted_groups : r.want_groups) || [];
+}
+function planLabel(groups) {
+  if (groups.includes('memory')) return 'Memory';
+  if (groups.includes('alpha')) return 'Pro';
+  return 'Free';
+}
+function reqProductLabel(r) {
+  return reqProduct(r) === 'alpha' ? 'Alpha Desk · ' + planLabel(reqGroups(r)) + ' 申请' : 'API Key';
+}
+function reqGroupLabel(g) {
+  return REQ_LABELS[g] || g;
+}
+function reqClaimUrl(r) {
+  return reqProduct(r) === 'alpha'
+    ? 'https://causal-memory.com/alpha-desk'
+    : 'https://causal-memory.com/apply?req=' + encodeURIComponent(r.req_no);
+}
+function reqById(id) {
+  return REQ_CACHE.find(r => r.id === id) || null;
+}
+function reqStatusMeta(r) {
+  if (r.status === 'approved' && r.token_pending) return ['paid', '待领取'];
+  if (r.status === 'approved' && r.picked_at) return ['ok', '已领取'];
+  if (r.status === 'approved') return ['ok', '已通过'];
+  return REQ_STATUS[r.status] || ['', r.status];
+}
+function relAge(ts) {
+  if (!ts) return '—';
+  const sec = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (sec < 60) return sec + ' 秒前';
+  if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' 小时前';
+  return Math.floor(sec / 86400) + ' 天前';
+}
+function reqSearchText(r) {
+  return [r.req_no, r.name, r.contact, r.purpose, r.volume, ...(reqGroups(r))].join(' ').toLowerCase();
+}
+function visibleRequests() {
+  const q = REQ_QUERY.trim().toLowerCase();
+  const rows = REQ_CACHE.filter(r => {
+    if (REQ_STATUS_FILTER !== 'all' && r.status !== REQ_STATUS_FILTER) return false;
+    if (REQ_PRODUCT_FILTER !== 'all' && reqProduct(r) !== REQ_PRODUCT_FILTER) return false;
+    return !q || reqSearchText(r).includes(q);
+  });
+  return rows.sort((a, b) => REQ_SORT === 'old'
+    ? (a.created_at || 0) - (b.created_at || 0)
+    : (b.created_at || 0) - (a.created_at || 0));
+}
+
+async function ensureReqLabels() {
+  if (REQ_LABELS_READY) return;
+  try {
+    const meta = await api('api/apply/meta');
+    for (const g of (meta.groups || [])) REQ_LABELS[g.name] = g.label || g.name;
+  } catch (_) { /* labels are a nicety; keep fallbacks */ }
+  REQ_LABELS_READY = true;
+}
+
+async function loadRequests() {
+  try {
+    const d = await api('api/requests');
+    REQ_CACHE = d.requests || [];
+    REQ_META = {
+      groups: d.apply_groups || [],
+      tiers: d.tiers || [],
+      default_tier: d.default_tier || 'paid',
+    };
+    await ensureReqLabels();
+    updateReqChrome();
+    ensureReqSelection();
+    renderReqList();
+    renderReqDetail();
+  } catch (e) {
+    $('req_list').innerHTML = `<div class="req-empty"><b>加载失败</b>${esc(e.message)}</div>`;
+    $('req_detail').innerHTML = '<div class="req-detail-empty">申请列表加载失败，请刷新重试。</div>';
+  }
+}
+
+function updateReqChrome() {
+  const pending = REQ_CACHE.filter(r => r.status === 'pending').length;
+  const approved = REQ_CACHE.filter(r => r.status === 'approved').length;
+  const rejected = REQ_CACHE.filter(r => r.status === 'rejected').length;
+  const claimable = REQ_CACHE.filter(r => r.token_pending).length;
+  $('req_pending_count').textContent = fmt(pending);
+  $('req_claimable_count').textContent = fmt(claimable);
+  $('req_approved_count').textContent = fmt(approved);
+  $('req_rejected_count').textContent = fmt(rejected);
+  $('cnt_pending').textContent = String(pending);
+  $('cnt_approved').textContent = String(approved);
+  $('cnt_rejected').textContent = String(rejected);
+  $('cnt_all').textContent = String(REQ_CACHE.length);
+  $('pending_reqs').textContent = fmt(pending);
+  const badge = $('req_badge');
+  if (pending) {
+    badge.textContent = pending + ' 条待审批';
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function ensureReqSelection() {
+  const rows = visibleRequests();
+  if (!REQ_SELECTED_ID || !rows.some(r => r.id === REQ_SELECTED_ID)) {
+    REQ_SELECTED_ID = rows.length ? rows[0].id : null;
+    REQ_DRAFT = null;
+    REQ_TOKEN = null;
+    REQ_REISSUE = false;
+  }
+}
+
+function setReqStatus(status) {
+  REQ_STATUS_FILTER = status;
+  REQ_REISSUE = false;
+  document.querySelectorAll('.req-tab').forEach(el => {
+    el.classList.toggle('on', el.dataset.status === status);
+  });
+  ensureReqSelection();
+  renderReqList();
+  renderReqDetail();
+}
+
+function setReqProduct(value) {
+  REQ_PRODUCT_FILTER = value;
+  ensureReqSelection();
+  renderReqList();
+  renderReqDetail();
+}
+
+function setReqSort(value) {
+  REQ_SORT = value;
+  renderReqList();
+}
+
+function onReqSearch(value) {
+  clearTimeout(REQ_SEARCH_TIMER);
+  REQ_SEARCH_TIMER = setTimeout(() => {
+    REQ_QUERY = value;
+    ensureReqSelection();
+    renderReqList();
+    renderReqDetail();
+  }, 120);
+}
+
+function selectRequest(id) {
+  REQ_SELECTED_ID = id;
+  REQ_DRAFT = null;
+  REQ_TOKEN = null;
+  REQ_REISSUE = false;
+  renderReqList();
+  renderReqDetail();
+}
+
+function renderReqList() {
+  const rows = visibleRequests();
+  const list = $('req_list');
+  if (!rows.length) {
+    const hint = REQ_CACHE.length
+      ? '当前筛选下没有申请。'
+      : '还没有申请。申请人提交后会出现在这里。';
+    list.innerHTML = `<div class="req-empty"><b>没有匹配的申请</b>${esc(hint)}</div>`;
     return;
   }
-  tb.innerHTML = REQ_CACHE.map(r => {
-    const [cls, text] = REQ_STATUS[r.status] || ['', r.status];
-    let act = '';
-    if (r.status === 'pending') {
-      act = `<button class="ghost sml" onclick="startApprove(${r.id},0)">通过</button>
-             <button class="ghost sml" onclick="startReject(${r.id})">拒绝</button>`;
-    } else if (r.status === 'approved') {
-      act = `<button class="ghost sml" onclick="startApprove(${r.id},1)">改发</button>`;
-      if (r.token_pending) {
-        act += ` <button class="ghost sml" onclick="showReqToken(${r.id})">查看密钥</button>`;
-      }
-    }
-    const picked = r.picked_at ? ` <span class="muted">已领取</span>` : '';
-    return `<tr id="req-${r.id}">
-      <td class="reqno">${esc(r.req_no)}</td>
-      <td>${esc(r.name)}</td>
-      <td>${esc(r.contact || '—')}</td>
-      <td>${(r.granted_groups && r.granted_groups.length ? r.granted_groups : r.want_groups || [])
-              .map(g => `<span class="pill">${esc(g)}</span>`).join(' ') || '—'}</td>
-      <td class="muted">${fmtTs(r.created_at)}</td>
-      <td><span class="pill ${cls}">${esc(text)}</span>${picked}</td>
-      <td>${act}</td>
-    </tr>
-    <tr id="req-brief-${r.id}"><td colspan="7" class="ap-brief">
-      ${r.purpose ? '用途：' + esc(r.purpose) : '（未填用途）'}
-      ${r.volume ? ' · 预计量：' + esc(r.volume) : ''}
-      ${r.mc_key_name ? ' · key 名：<span class="mono">' + esc(r.mc_key_name) + '</span>' : ''}
-      ${r.reject_reason ? ' · 拒绝理由：' + esc(r.reject_reason) : ''}
-    </td></tr>`;
+  list.innerHTML = rows.map(r => {
+    const [cls, text] = reqStatusMeta(r);
+    const groups = reqGroups(r);
+    const active = r.id === REQ_SELECTED_ID ? ' on' : '';
+    const claim = r.status === 'approved' && r.token_pending ? ' · 待领取' : '';
+    return `<button type="button" class="req-card${active}" onclick="selectRequest(${r.id})">
+      <div class="req-card-top">
+        <span class="req-product ${reqProduct(r)}">${reqProduct(r) === 'alpha' ? 'Alpha Desk' : 'API Key'}</span>
+        <span class="pill ${cls} req-status">${esc(text)}${claim}</span>
+      </div>
+      <div class="req-card-name">${esc(r.name)}<span class="req-id">${esc(r.req_no)}</span></div>
+      <div class="req-card-purpose">${esc(r.purpose || '（未填用途）')}</div>
+      <div class="req-card-meta">
+        ${groups.map(g => `<span class="pill">${esc(g)}</span>`).join('')}
+        <span>${relAge(r.created_at)}</span>
+        ${r.picked_at ? '<span>· 已领取</span>' : ''}
+      </div>
+    </button>`;
   }).join('');
 }
 
-/* isReissue: 0=通过 1=改发 */
-function startApprove(id, isReissue) {
-  const r = REQ_CACHE.find(x => x.id === id);
-  if (!r) return;
-  if (!REQ_META.groups.length) return alert('服务端未配置 apply_groups，无法审批');
-  const pre = (r.granted_groups && r.granted_groups.length ? r.granted_groups : r.want_groups) || [];
-  const boxes = REQ_META.groups.map(g =>
-    `<label class="ap-grp"><input type="checkbox" value="${esc(g)}"
-       ${pre.includes(g) ? 'checked' : ''}/> ${esc(g)}</label>`).join('');
-  const tiers = REQ_META.tiers.map(t =>
-    `<option value="${esc(t)}" ${t === REQ_META.default_tier ? 'selected' : ''}>${esc(t)}</option>`).join('');
-  window.AP_OPEN = true;
-  $('req-' + id).innerHTML = `<td colspan="7">
-    <div><b>${isReissue ? '改发' : '通过'}申请</b> ${esc(r.req_no)} · ${esc(r.name)}
-      ${isReissue ? '<span class="muted">（会新建一把密钥并停用旧的，分组/档位可改）</span>' : ''}</div>
-    <div style="margin:8px 0"><span class="muted">授权分组：</span>${boxes}</div>
-    <div>
-      <span class="muted">配额档位：</span>
-      <select id="ap-tier">${tiers}</select>
-      <button onclick="submitApprove(${id},${isReissue})">确认${isReissue ? '改发' : '通过'}</button>
-      <button class="ghost" onclick="window.AP_OPEN=false;renderRequests()">取消</button>
-      <span class="muted" id="ap-msg"></span>
-    </div></td>`;
+function initDraft(r) {
+  if (REQ_DRAFT && REQ_DRAFT.id === r.id) return;
+  const wanted = reqGroups(r).filter(g => REQ_META.groups.includes(g));
+  const fallback = REQ_META.groups.includes('alpha') ? ['alpha'] : REQ_META.groups.slice(0, 1);
+  REQ_DRAFT = {
+    id: r.id,
+    groups: new Set(wanted.length ? wanted : fallback),
+    tier: REQ_META.default_tier || 'paid',
+  };
 }
 
-async function submitApprove(id, isReissue) {
-  const groups = [...document.querySelectorAll('#req-' + id + ' input[type=checkbox]:checked')]
-    .map(i => i.value);
-  if (!groups.length) return apMsg(id, '请至少勾选一个分组', true);
-  const tier = $('ap-tier').value;
-  apMsg(id, '正在调 mcphub 建 key…');
+function draftSummary() {
+  if (!REQ_DRAFT) return '';
+  const groups = [...REQ_DRAFT.groups];
+  const plan = planLabel(groups);
+  const row = reqById(REQ_SELECTED_ID);
+  const product = row && reqProduct(row) === 'alpha' ? 'Alpha Desk · ' + plan : 'API Key';
+  const groupText = groups.length
+    ? groups.map(g => `<b>${esc(g)}</b>（${esc(reqGroupLabel(g))}）`).join(' + ')
+    : '<b style="color:var(--bad)">未选择分组</b>';
+  return `将创建 <b>${product}</b>；授权 ${groupText}；档位 <b>${esc(REQ_DRAFT.tier)}</b>。`;
+}
+
+function updateDraftSummary() {
+  const el = $('req_summary');
+  if (el) el.innerHTML = draftSummary();
+  const btn = $('req_approve_btn');
+  if (btn) btn.disabled = !REQ_DRAFT || REQ_DRAFT.groups.size === 0;
+}
+
+function renderReqDetail() {
+  const el = $('req_detail');
+  const r = reqById(REQ_SELECTED_ID);
+  if (!r) {
+    el.innerHTML = '<div class="req-detail-empty"><b>选择一条申请</b>左侧列表里点一条，查看申请人、分组和审批操作。</div>';
+    return;
+  }
+  const prod = reqProduct(r);
+  const groups = reqGroups(r);
+  const [cls, text] = reqStatusMeta(r);
+  const canApprove = r.status === 'pending' || (r.status === 'approved' && REQ_REISSUE);
+  if (canApprove) initDraft(r);
+  const claim = r.status === 'approved'
+    ? (r.token_pending
+        ? '<span class="pill paid">待领取</span>'
+        : r.picked_at
+          ? '<span class="pill ok">已领取</span>'
+          : '<span class="pill blocked">不可领取</span>')
+    : '';
+
+  const head = `<div class="req-detail-head">
+    <span class="req-product ${prod}">${prod === 'alpha' ? 'Alpha Desk' : 'API Key'}</span>
+    <span class="pill ${cls}">${esc(text)}</span>
+    ${claim}
+    <span class="req-id">${esc(r.req_no)}
+      <button type="button" class="req-link" onclick="copyText('${esc(r.req_no)}','申请单号')" style="background:none;border:0;padding:0 0 0 6px">复制</button>
+    </span>
+  </div>`;
+
+  const fields = [
+    ['称呼 / 团队', esc(r.name)],
+    ['联系方式', r.contact ? `${esc(r.contact)} <button type="button" class="req-link" onclick="copyText(this.nextElementSibling.textContent,'联系方式')" style="background:none;border:0;padding:0 0 0 5px">复制</button><span class="copy-src" hidden>${esc(r.contact)}</span>` : '—'],
+    ['申请分组', groups.length ? groups.map(g => `<span class="pill">${esc(g)} · ${esc(reqGroupLabel(g))}</span>`).join(' ') : '—'],
+    ['预计使用强度', esc(r.volume || '—')],
+    ['提交时间', fmtTs(r.created_at)],
+    ['审批 / 领取', r.decided_at ? `${fmtTs(r.decided_at)}${r.picked_at ? ' · 领取 ' + fmtTs(r.picked_at) : ''}` : '—'],
+  ];
+
+  let body = `<h3>${esc(r.name)} <span class="req-contact">${esc(r.contact || '')}</span></h3>
+    <div class="req-purpose">${esc(r.purpose || '（未填用途）')}</div>
+    <div class="req-grid">${fields.map(([k, v]) => `<div class="req-field"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')}</div>`;
+
+  if (canApprove) {
+    const presets = prod === 'alpha' ? `<div class="req-presets">
+      <button type="button" class="req-preset ${REQ_DRAFT && REQ_DRAFT.groups.size === 1 && REQ_DRAFT.groups.has('alpha') ? 'on' : ''}" onclick="applyReqPreset('pro')">Alpha Desk Pro · alpha</button>
+      <button type="button" class="req-preset ${REQ_DRAFT && REQ_DRAFT.groups.has('alpha') && REQ_DRAFT.groups.has('memory') ? 'on' : ''}" onclick="applyReqPreset('memory')">Alpha Desk Memory · alpha + memory</button>
+      <button type="button" class="req-preset" onclick="applyReqPreset('requested')">按申请人勾选</button>
+    </div>` : '';
+    const boxes = REQ_META.groups.map(g => {
+      const on = REQ_DRAFT && REQ_DRAFT.groups.has(g);
+      return `<label class="req-group ${on ? 'on' : ''}">
+        <input type="checkbox" value="${esc(g)}" ${on ? 'checked' : ''} onchange="toggleReqGroup('${esc(g)}', this.checked)">
+        <span><b>${esc(reqGroupLabel(g))}</b><small>${esc(g)}</small></span>
+      </label>`;
+    }).join('');
+    const tiers = (REQ_META.tiers || []).map(t =>
+      `<option value="${esc(t)}" ${REQ_DRAFT && t === REQ_DRAFT.tier ? 'selected' : ''}>${esc(TIER_LABEL[t] || t)}</option>`
+    ).join('');
+    body += `<div class="req-section">
+      <div class="req-section-title"><b>${REQ_REISSUE ? '改发密钥' : '审批配置'}</b>${REQ_REISSUE ? '<span>会新建一把 key，并停用旧的</span>' : '<span>通过后申请人凭单号领取</span>'}</div>
+      ${presets}
+      <div class="req-groups">${boxes}</div>
+      <div class="req-tier">配额档位 <select id="req_tier" onchange="setReqTier(this.value)">${tiers || '<option value="' + esc(REQ_META.default_tier) + '">' + esc(REQ_META.default_tier) + '</option>'}</select></div>
+      <div class="req-summary" id="req_summary">${draftSummary()}</div>
+      <div class="req-actions">
+        <button type="button" class="req-primary" id="req_approve_btn" onclick="submitApprove(${REQ_REISSUE ? 'true' : 'false'})" ${!REQ_DRAFT || REQ_DRAFT.groups.size === 0 ? 'disabled' : ''}>${REQ_REISSUE ? '确认改发' : '确认通过'}</button>
+        ${REQ_REISSUE ? '<button type="button" class="req-ghost" onclick="cancelReissue()">取消改发</button>' : ''}
+      </div>
+    </div>`;
+    if (r.status === 'pending') {
+      body += `<div class="req-section">
+        <div class="req-section-title"><b>拒绝申请</b><span>理由会展示给申请人</span></div>
+        <textarea class="req-reason" id="req_reason" placeholder="填写拒绝理由，例如：用途不明确、联系不上、暂不开放该分组…"></textarea>
+        <div class="req-reasons">
+          <button type="button" onclick="setRejectReason('用途不明确，请补充具体使用场景')">用途不明确</button>
+          <button type="button" onclick="setRejectReason('联系方式无法验证')">联系不上</button>
+          <button type="button" onclick="setRejectReason('当前暂不开放该分组')">暂不开放</button>
+        </div>
+        <button type="button" class="req-danger" onclick="submitReject()">拒绝并通知</button>
+      </div>`;
+    }
+  } else if (r.status === 'approved') {
+    body += `<div class="req-section">
+      <div class="req-section-title"><b>领取状态</b>${claim}</div>
+      <div class="req-grid">
+        <div class="req-field"><div class="k">mcphub key</div><div class="v mono">${esc(r.mc_key_name || '—')}</div></div>
+        <div class="req-field"><div class="k">领取页</div><div class="v"><a class="req-link" href="${reqClaimUrl(r)}" target="_blank" rel="noopener">打开领取页</a> <button type="button" class="req-link" onclick="copyText('${reqClaimUrl(r)}','领取链接')" style="background:none;border:0;padding:0 0 0 5px">复制链接</button></div></div>
+      </div>
+      <div class="req-actions">
+        ${r.token_pending ? `<button type="button" class="req-ghost" onclick="showReqToken(${r.id})">查看待领取密钥</button>` : ''}
+        <button type="button" class="req-ghost" onclick="startReissue()">改发 / 换分组</button>
+      </div>
+      ${REQ_TOKEN && REQ_TOKEN.id === r.id ? `<div class="req-token">
+        <div class="muted" style="font-size:10.5px">${esc(REQ_TOKEN.key_name || '')} · 仅管理员可见</div>
+        <pre>${esc(REQ_TOKEN.token)}</pre>
+        <div class="req-actions"><button type="button" class="req-ghost" onclick="copyText(REQ_TOKEN.token,'密钥')">复制密钥</button><button type="button" class="req-ghost" onclick="hideReqToken()">收起</button></div>
+        <div class="warn">申请人领取后，这里也会消失。人工转发后请提醒对方妥善保存。</div>
+      </div>` : ''}
+    </div>`;
+  } else if (r.status === 'rejected') {
+    body += `<div class="req-section"><div class="req-section-title"><b>拒绝理由</b></div><div class="req-purpose">${esc(r.reject_reason || '（未填写）')}</div></div>`;
+  }
+
+  el.innerHTML = head + body;
+}
+
+function applyReqPreset(kind) {
+  const r = reqById(REQ_SELECTED_ID);
+  if (!r || !REQ_DRAFT) return;
+  if (kind === 'pro') REQ_DRAFT.groups = new Set(['alpha']);
+  else if (kind === 'memory') REQ_DRAFT.groups = new Set(['alpha', 'memory']);
+  else REQ_DRAFT.groups = new Set(reqGroups(r).filter(g => REQ_META.groups.includes(g)));
+  renderReqDetail();
+}
+
+function toggleReqGroup(group, checked) {
+  if (!REQ_DRAFT) return;
+  if (checked) REQ_DRAFT.groups.add(group); else REQ_DRAFT.groups.delete(group);
+  const label = [...document.querySelectorAll('.req-group')].find(el => el.querySelector('small')?.textContent === group);
+  if (label) label.classList.toggle('on', checked);
+  updateDraftSummary();
+}
+
+function setReqTier(value) {
+  if (!REQ_DRAFT) return;
+  REQ_DRAFT.tier = value;
+  updateDraftSummary();
+}
+
+function setRejectReason(text) {
+  const el = $('req_reason');
+  if (el) el.value = text;
+}
+
+function startReissue() {
+  REQ_REISSUE = true;
+  REQ_DRAFT = null;
+  REQ_TOKEN = null;
+  renderReqDetail();
+}
+
+function cancelReissue() {
+  REQ_REISSUE = false;
+  REQ_DRAFT = null;
+  renderReqDetail();
+}
+
+async function submitApprove(isReissue) {
+  const r = reqById(REQ_SELECTED_ID);
+  if (!r || !REQ_DRAFT) return;
+  const groups = [...REQ_DRAFT.groups];
+  if (!groups.length) return toast('至少勾选一个分组', 'err');
+  const tier = REQ_DRAFT.tier || REQ_META.default_tier || 'paid';
+  const btn = $('req_approve_btn');
+  if (btn) btn.disabled = true;
+  window.REQ_BUSY = true;
   try {
-    const d = await api(`/api/requests/${id}/${isReissue ? 'reissue' : 'approve'}`,
-      { method: 'POST', body: JSON.stringify({ groups, tier }) });
-    window.AP_OPEN = false;
-    let note = `已创建 key「${d.key_name}」，申请人可凭单号领取。`;
-    if (d.old_key_note) note += ' ' + d.old_key_note;
-    if (d.warning) alert(note + '\n\n⚠ ' + d.warning); else note && console.log(note);
+    const d = await api(`api/requests/${r.id}/${isReissue ? 'reissue' : 'approve'}`, {
+      method: 'POST',
+      body: JSON.stringify({ groups, tier }),
+    });
+    REQ_STATUS_FILTER = 'approved';
+    REQ_SELECTED_ID = r.id;
+    REQ_REISSUE = false;
+    REQ_DRAFT = null;
     await loadRequests();
-    load();
+    setReqStatus('approved');
+    let note = `已通过 ${r.req_no}，key「${d.key_name}」已创建，等待申请人领取。`;
+    if (d.warning) note += ' 注意：' + d.warning;
+    toast(note, d.warning ? 'err' : 'ok');
   } catch (e) {
-    apMsg(id, '失败：' + e.message, true);
+    toast('审批失败：' + e.message, 'err');
+    if (btn) btn.disabled = false;
+  } finally {
+    window.REQ_BUSY = false;
   }
 }
 
-function apMsg(id, text, isErr) {
-  const el = $('ap-msg');
-  if (el) { el.textContent = text || ''; el.style.color = isErr ? 'var(--bad)' : ''; }
-}
-
-function startReject(id) {
-  const r = REQ_CACHE.find(x => x.id === id);
+async function submitReject() {
+  const r = reqById(REQ_SELECTED_ID);
   if (!r) return;
-  const reason = window.prompt(`拒绝申请 ${r.req_no}（${r.name}）\n请填写理由，申请人会看到：`, '');
-  if (reason === null) return;
-  api(`/api/requests/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) })
-    .then(() => loadRequests())
-    .catch(e => alert('拒绝失败：' + e.message));
+  const reason = ($('req_reason')?.value || '').trim();
+  if (!reason) return toast('请填写拒绝理由，申请人会看到它', 'err');
+  window.REQ_BUSY = true;
+  try {
+    await api(`api/requests/${r.id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) });
+    REQ_STATUS_FILTER = 'rejected';
+    REQ_SELECTED_ID = r.id;
+    await loadRequests();
+    setReqStatus('rejected');
+    toast(`已拒绝 ${r.req_no}`, 'ok');
+  } catch (e) {
+    toast('拒绝失败：' + e.message, 'err');
+  } finally {
+    window.REQ_BUSY = false;
+  }
 }
 
 async function showReqToken(id) {
   try {
-    const d = await api(`/api/requests/${id}/token`);
-    const urls = (d.access.per_group || []).map(g => g.group + ' → ' + g.url).join('\n');
-    window.prompt(`key「${d.key_name}」的密钥（申请人尚未领取）\n\n` +
-      `复制后发给申请人；他自助领取后这里就不再可见。\n\n${urls}`,
-      d.token);
+    const d = await api(`api/requests/${id}/token`);
+    REQ_TOKEN = { id, token: d.token, key_name: d.key_name };
+    renderReqDetail();
   } catch (e) {
-    alert('取密钥失败：' + e.message);
+    toast('取密钥失败：' + e.message, 'err');
   }
+}
+
+function hideReqToken() {
+  REQ_TOKEN = null;
+  renderReqDetail();
+}
+
+async function copyText(text, label) {
+  try {
+    await navigator.clipboard.writeText(String(text));
+    toast((label || '内容') + '已复制', 'ok');
+  } catch (_) {
+    toast('复制失败，请手动选中', 'err');
+  }
+}
+
+let reqToastTimer = null;
+function toast(text, kind) {
+  let el = $('req_toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'req_toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text || '';
+  el.classList.toggle('err', kind === 'err');
+  el.classList.add('show');
+  clearTimeout(reqToastTimer);
+  reqToastTimer = setTimeout(() => el.classList.remove('show'), kind === 'err' ? 7000 : 4500);
 }
 
 async function loadKey(name) {
@@ -1355,5 +1815,6 @@ async function wbDecide(fid,eid,action){
 }
 setTimeout(loadWbPending, 1000);
 </script>
+<div id="req_toast"></div>
 </body>
 </html>
