@@ -38,6 +38,13 @@
   .pill.blocked { color: var(--bad); border-color: var(--bad); }
   .pill.ok { color: var(--ok); border-color: var(--ok); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .req-timeline { position: relative; margin-left: 5px; padding-left: 14px; border-left: 1px solid var(--line); }
+  .req-event { position: relative; padding-bottom: 10px; }
+  .req-event:last-child { padding-bottom: 0; }
+  .req-event::before { content: ""; position: absolute; left: -18px; top: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--panel); }
+  .req-event .ev-kind { font-size: 11.5px; font-weight: 600; }
+  .req-event .ev-meta { color: var(--dim); font-size: 10px; margin-top: 1px; }
+  .req-event .ev-detail { color: var(--dim); font-size: 10.5px; margin-top: 2px; word-break: break-all; }
   .dash-title { margin: 24px 0 10px; font-size: 11px; color: var(--dim); letter-spacing: 1px; }
   @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
   .btnrow { display: flex; gap: 10px; align-items: center; padding: 12px 16px; flex-wrap: wrap; }
@@ -170,6 +177,22 @@
   }
   .req-card:hover { background: #1b1f27; }
   .req-card.on { background: #1d232d; border-left-color: var(--accent); }
+  .req-card:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* 批量通过：待审批卡片上的勾选框（点击不改变右侧详情选中项） */
+  .req-pick { display: flex; align-items: center; padding: 1px 3px 1px 0; cursor: pointer; flex: none; }
+  .req-pick input { width: 13px; height: 13px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+  .req-keys { padding: 0 13px 8px; color: #6f7786; font-size: 10.5px; letter-spacing: .2px; }
+  .req-batch {
+    display: flex; align-items: center; gap: 7px; padding: 7px 12px; flex-wrap: wrap;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    background: rgba(232, 176, 75, .05);
+  }
+  .req-batch-count { color: var(--dim); font-size: 11.5px; }
+  .req-batch-count b { color: var(--accent); font: 600 12.5px var(--mono); }
+  .req-batch .sep { color: #3a4150; }
+  .req-batch .req-primary { padding: 5px 12px; font-size: 11.5px; }
+  .req-batch .req-primary:disabled { cursor: default; filter: none; }
+  .req-batch .req-ghost { padding: 4px 10px; font-size: 11.5px; }
   .req-card-top { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
   .req-product { font-size: 10px; font-weight: 700; letter-spacing: .2px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--dim); }
   .req-product.alpha { color: #6ab0ff; border-color: #3d6f9f; background: rgba(77,163,255,.08); }
@@ -233,6 +256,7 @@
     .req-list { max-height: 360px; }
     .req-detail { min-height: 0; }
     .req-grid, .req-groups { grid-template-columns: 1fr; }
+    .req-keys { display: none; }  /* 快捷键提示只对桌面键盘有意义 */
   }
 
 </style>
@@ -299,6 +323,14 @@
             </select>
           </div>
           <div class="muted" id="req_hint" style="padding:0 13px 9px;font-size:10.5px;line-height:1.5"></div>
+          <div class="req-keys" id="req_keys">j/k 切换 · / 搜索 · Esc 清除</div>
+          <!-- 批量通过：只对待审批生效，始终需要一次确认 -->
+          <div class="req-batch" id="req_batch" style="display:none">
+            <span class="req-batch-count">已选 <b id="req_batch_n">0</b> 条</span>
+            <span class="sep">·</span>
+            <button type="button" class="req-primary" id="req_batch_btn" onclick="batchApprove()" disabled>批量通过</button>
+            <button type="button" class="req-ghost" onclick="clearReqPicks()">清除</button>
+          </div>
           <div class="req-list" id="req_list"></div>
         </div>
         <div class="req-detail" id="req_detail"></div>
@@ -1108,6 +1140,7 @@ let REQ_DRAFT = null;
 let REQ_TOKEN = null;
 let REQ_REISSUE = false;
 let REQ_SEARCH_TIMER = null;
+let REQ_BATCH = new Set();   // 勾选的申请 id（批量通过只在 pending 上生效）
 window.REQ_BUSY = false;
 
 const REQ_STATUS = {
@@ -1120,6 +1153,10 @@ const REQ_STATUS = {
 const TIER_LABEL = { free: 'free（免费）', paid: 'paid（付费）', heavy: 'heavy（重度）' };
 
 function reqProduct(r) {
+  const product = String(r.product || '').toLowerCase();
+  if (product === 'alpha-desk') return 'alpha';
+  if (product === 'api') return 'api';
+  // Backward compatibility for rows created before the product column existed.
   return String(r.purpose || '').toLowerCase().includes('alpha desk') ? 'alpha' : 'api';
 }
 function reqGroups(r) {
@@ -1192,13 +1229,16 @@ async function loadRequests() {
       default_tier: d.default_tier || 'paid',
     };
     await ensureReqLabels();
+    pruneReqPicks();          // 自动刷新后，已不再是 pending 的勾选自动移除
     updateReqChrome();
     ensureReqSelection();
     renderReqList();
+    renderReqBatchBar();
     renderReqDetail();
   } catch (e) {
     $('req_list').innerHTML = `<div class="req-empty"><b>加载失败</b>${esc(e.message)}</div>`;
     $('req_detail').innerHTML = '<div class="req-detail-empty">申请列表加载失败，请刷新重试。</div>';
+    renderReqBatchBar();
   }
 }
 
@@ -1243,6 +1283,7 @@ function setReqStatus(status) {
   });
   ensureReqSelection();
   renderReqList();
+  renderReqBatchBar();
   renderReqDetail();
 }
 
@@ -1250,12 +1291,14 @@ function setReqProduct(value) {
   REQ_PRODUCT_FILTER = value;
   ensureReqSelection();
   renderReqList();
+  renderReqBatchBar();
   renderReqDetail();
 }
 
 function setReqSort(value) {
   REQ_SORT = value;
   renderReqList();
+  renderReqBatchBar();
 }
 
 function onReqSearch(value) {
@@ -1264,6 +1307,7 @@ function onReqSearch(value) {
     REQ_QUERY = value;
     ensureReqSelection();
     renderReqList();
+    renderReqBatchBar();
     renderReqDetail();
   }, 120);
 }
@@ -1276,6 +1320,222 @@ function selectRequest(id) {
   renderReqList();
   renderReqDetail();
 }
+
+/* ---------------- 批量通过（仅 pending） ----------------
+   勾选状态独立于右侧详情选中项：点勾选框不会切换当前查看的申请。
+   批量操作永远只调用 approve，不提供批量拒绝。 */
+
+function pendPicks() {
+  return REQ_CACHE.filter(r => REQ_BATCH.has(r.id) && r.status === 'pending');
+}
+
+function toggleReqPick(id, checked) {
+  if (checked) REQ_BATCH.add(id); else REQ_BATCH.delete(id);
+  renderReqBatchBar();  // 只更新操作条，不重绘列表（保住滚动位置）
+}
+
+function clearReqPicks() {
+  if (!REQ_BATCH.size) return;
+  REQ_BATCH.clear();
+  document.querySelectorAll('#req_list .req-pick input').forEach(el => { el.checked = false; });
+  renderReqBatchBar();
+}
+
+// 列表刷新后丢掉已通过/已删除的勾选；仍待审批的失败项保留，方便重试
+function pruneReqPicks() {
+  for (const id of [...REQ_BATCH]) {
+    const r = reqById(id);
+    if (!r || r.status !== 'pending') REQ_BATCH.delete(id);
+  }
+}
+
+function renderReqBatchBar() {
+  const bar = $('req_batch');
+  if (!bar) return;
+  const picks = pendPicks();
+  const visiblePending = visibleRequests().filter(r => r.status === 'pending').length;
+  bar.style.display = (picks.length || visiblePending) ? '' : 'none';
+  const n = $('req_batch_n');
+  if (n) n.textContent = String(picks.length);
+  const btn = $('req_batch_btn');
+  if (btn) {
+    btn.disabled = picks.length === 0 || window.REQ_BUSY;
+    if (!window.REQ_BUSY) btn.textContent = '批量通过';
+  }
+}
+
+// 批量审批时的分组预设：产品相关，与右侧详情里的预设保持同一套规则
+function batchGroupsFor(r) {
+  const allowed = REQ_META.groups || [];
+  const want = Array.isArray(r.want_groups) ? r.want_groups : reqGroups(r);
+  if (reqProduct(r) === 'alpha') {
+    // Alpha Desk：勾了 memory 就给 alpha + memory，否则只给 alpha
+    return want.includes('memory') ? ['alpha', 'memory'] : ['alpha'];
+  }
+  // API Key：申请人勾选的分组 ∩ 平台允许申请的分组
+  return (want || []).filter(g => allowed.includes(g));
+}
+
+async function batchApprove() {
+  if (window.REQ_BUSY) return;
+  const targets = pendPicks();
+  if (!targets.length) return toast('请先勾选待审批申请', 'err');
+  const alphaN = targets.filter(r => reqProduct(r) === 'alpha').length;
+  const apiN = targets.length - alphaN;
+  const tier = REQ_META.default_tier || 'paid';
+  const prodText = [alphaN ? `Alpha Desk ${alphaN} 条` : '', apiN ? `API Key ${apiN} 条` : '']
+    .filter(Boolean).join(' · ');
+  const ok = confirm(`批量通过 ${targets.length} 条待审批申请？\n${prodText}\n档位：${tier}\n\n`
+    + '分组按产品预设自动选择（Alpha Desk：alpha 或 alpha + memory；API Key：申请人勾选且平台支持的分组）。');
+  if (!ok) return;
+
+  const btn = $('req_batch_btn');
+  // 运行期间挡住单条审批，避免两个流程同时改同一批数据
+  const singleBtn = $('req_approve_btn');
+  window.REQ_BUSY = true;
+  if (btn) { btn.disabled = true; btn.textContent = `通过中 0/${targets.length}…`; }
+  if (singleBtn) singleBtn.disabled = true;
+
+  let done = 0, failed = 0, warned = 0;
+  const errors = [], warnings = [];
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      const r = targets[i];
+      const groups = batchGroupsFor(r);
+      if (btn) btn.textContent = `通过中 ${i + 1}/${targets.length}…`;
+      try {
+        const d = await api(`api/requests/${r.id}/approve`, {
+          method: 'POST',
+          body: JSON.stringify({ groups, tier }),
+        });
+        done++;
+        REQ_BATCH.delete(r.id);  // 成功的立刻移出选区，刷新后不会当成失败项
+        if (d && d.warning) { warned++; warnings.push(`${r.req_no}：${d.warning}`); }
+      } catch (e) {
+        failed++;
+        errors.push(`${r.req_no}：${e.message}`);
+        if (e.code === 401) break;  // 登录失效：别再对剩下的单子空打请求
+      }
+    }
+  } finally {
+    // 刷新会重绘右侧详情：若当前正在写拒绝理由，别把它冲掉
+    const reasonEl = $('req_reason');
+    const reasonText = reasonEl ? reasonEl.value : '';
+    const reasonId = REQ_SELECTED_ID;
+    await loadRequests();  // 无论成败都刷新，成功的单子不能丢
+    if (reasonText && REQ_SELECTED_ID === reasonId) {
+      const el = $('req_reason');
+      if (el) el.value = reasonText;
+    }
+    window.REQ_BUSY = false;
+    if (btn) btn.textContent = '批量通过';
+    renderReqBatchBar();
+  }
+
+  const skipped = targets.length - done - failed;
+  const bits = [`成功 ${done} 条`];
+  if (warned) bits.push(`含 ${warned} 条档位警告`);
+  if (failed) bits.push(`失败 ${failed} 条`);
+  if (skipped) bits.push(`未执行 ${skipped} 条`);
+  let text = `批量通过完成：${bits.join('，')}`;
+  if (errors.length) text += `；首个错误：${errors[0]}`;
+  else if (warnings.length) text += `；首个警告：${warnings[0]}`;
+  toast(text, (failed || warned) ? 'err' : 'ok');
+}
+
+/* ---------------- 键盘快捷键（桌面；绝不把 Enter 绑定到审批） ---------------- */
+
+function isEditableTarget(el) {
+  if (!el) return false;
+  const tag = String(el.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  return !!el.isContentEditable;
+}
+
+function scrollReqCardIntoView(id) {
+  const card = document.querySelector(`#req_list .req-card[data-req-id="${id}"]`);
+  if (card) card.scrollIntoView({ block: 'nearest' });
+}
+
+function moveReqSelection(dir) {
+  const rows = visibleRequests();
+  if (!rows.length) return;
+  let i = rows.findIndex(r => r.id === REQ_SELECTED_ID);
+  if (i < 0) i = dir > 0 ? -1 : rows.length;
+  const next = Math.min(rows.length - 1, Math.max(0, i + dir));
+  const id = rows[next].id;
+  if (id !== REQ_SELECTED_ID) selectRequest(id);
+  scrollReqCardIntoView(id);
+}
+
+function focusReqSearch() {
+  const el = $('req_search');
+  if (!el) return;
+  el.focus();
+  el.select();
+}
+
+function clearReqSearch(keepFocus) {
+  clearTimeout(REQ_SEARCH_TIMER);
+  const el = $('req_search');
+  if (el) el.value = '';
+  REQ_QUERY = '';
+  ensureReqSelection();
+  renderReqList();
+  renderReqBatchBar();
+  renderReqDetail();
+  if (keepFocus && el) el.focus();
+}
+
+// Esc 的优先级：先清搜索，再收起密钥，最后只做失焦；永远不关闭页面
+function inReqToolbar(el) {
+  return !!(el && el.closest && el.closest('.req-filters, .req-tabs'));
+}
+
+function reqEsc(ev) {
+  const el = $('req_search');
+  const t = document.activeElement;
+  const inToolbar = inReqToolbar(t);
+  const hasQuery = !!((el && el.value) || REQ_QUERY);
+  if (inToolbar && hasQuery) { clearReqSearch(true); ev.preventDefault(); return; }
+  if (REQ_TOKEN) { hideReqToken(); ev.preventDefault(); return; }
+  if (hasQuery) { clearReqSearch(false); ev.preventDefault(); return; }
+  if (inToolbar && t) t.blur();
+}
+
+function reqCardKey(ev, id) {
+  if (ev.key !== 'Enter' && ev.key !== ' ') return;
+  if (isEditableTarget(ev.target)) return;  // 勾选框等控件自己处理键盘
+  ev.preventDefault();
+  selectRequest(id);
+}
+
+function onGlobalKey(ev) {
+  if (ev.defaultPrevented) return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if ($('login-overlay').classList.contains('show')) return;
+  if (currentKey) return;  // key 下钻视图不接管快捷键
+  const editable = isEditableTarget(ev.target);
+
+  if (ev.key === 'Escape') {
+    // 输入框里打字时 Esc 不清空内容；搜索/筛选控件例外
+    if (editable && !inReqToolbar(ev.target)) return;
+    reqEsc(ev);
+    return;
+  }
+  if (editable) return;      // 输入/下拉/可编辑区域里不劫持 j、k、/
+  if (ev.key === 'j' || ev.key === 'k') {
+    ev.preventDefault();
+    moveReqSelection(ev.key === 'j' ? 1 : -1);
+    return;
+  }
+  if (ev.key === '/') {
+    ev.preventDefault();
+    focusReqSearch();
+  }
+}
+
+document.addEventListener('keydown', onGlobalKey);
 
 function renderReqList() {
   const rows = visibleRequests();
@@ -1292,8 +1552,12 @@ function renderReqList() {
     const groups = reqGroups(r);
     const active = r.id === REQ_SELECTED_ID ? ' on' : '';
     const claim = r.status === 'approved' && r.token_pending ? ' · 待领取' : '';
-    return `<button type="button" class="req-card${active}" onclick="selectRequest(${r.id})">
+    const pickable = r.status === 'pending';
+    const picked = pickable && REQ_BATCH.has(r.id);
+    return `<div class="req-card${active}" role="button" tabindex="0" data-req-id="${esc(r.id)}"
+        onclick="selectRequest(${r.id})" onkeydown="reqCardKey(event, ${r.id})">
       <div class="req-card-top">
+        ${pickable ? `<label class="req-pick" title="勾选后批量通过" onclick="event.stopPropagation()"><input type="checkbox" aria-label="选择该申请批量通过" ${picked ? 'checked' : ''} onchange="toggleReqPick(${r.id}, this.checked)"></label>` : ''}
         <span class="req-product ${reqProduct(r)}">${reqProduct(r) === 'alpha' ? 'Alpha Desk' : 'API Key'}</span>
         <span class="pill ${cls} req-status">${esc(text)}${claim}</span>
       </div>
@@ -1304,7 +1568,7 @@ function renderReqList() {
         <span>${relAge(r.created_at)}</span>
         ${r.picked_at ? '<span>· 已领取</span>' : ''}
       </div>
-    </button>`;
+    </div>`;
   }).join('');
 }
 
@@ -1336,6 +1600,33 @@ function updateDraftSummary() {
   if (el) el.innerHTML = draftSummary();
   const btn = $('req_approve_btn');
   if (btn) btn.disabled = !REQ_DRAFT || REQ_DRAFT.groups.size === 0;
+}
+
+function reqEventLabel(kind) {
+  return ({
+    submitted: '提交申请',
+    approved: '审批通过',
+    rejected: '拒绝申请',
+    reissued: '改发密钥',
+    'picked-up': '领取密钥',
+  })[kind] || kind;
+}
+function reqEventActor(actor) {
+  if (!actor) return '系统';
+  return actor === 'applicant' ? '申请人' : actor;
+}
+function renderReqTimeline(r) {
+  const events = Array.isArray(r.events) ? r.events : [];
+  if (!events.length) return '';
+  const rows = events.map(e => `<div class="req-event">
+    <div class="ev-kind">${esc(reqEventLabel(e.kind))}</div>
+    <div class="ev-meta">${fmtTs(e.ts)} · ${esc(reqEventActor(e.actor))}</div>
+    ${e.detail ? `<div class="ev-detail">${esc(e.detail)}</div>` : ''}
+  </div>`).join('');
+  return `<div class="req-section">
+    <div class="req-section-title"><b>申请时间线</b><span>最新在前</span></div>
+    <div class="req-timeline">${rows}</div>
+  </div>`;
 }
 
 function renderReqDetail() {
@@ -1441,7 +1732,7 @@ function renderReqDetail() {
     body += `<div class="req-section"><div class="req-section-title"><b>拒绝理由</b></div><div class="req-purpose">${esc(r.reject_reason || '（未填写）')}</div></div>`;
   }
 
-  el.innerHTML = head + body;
+  el.innerHTML = head + body + renderReqTimeline(r);
 }
 
 function applyReqPreset(kind) {
