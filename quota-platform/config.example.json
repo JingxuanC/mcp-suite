@@ -49,12 +49,12 @@
     },
     "paid": {
       "daily": 2000,
-      "monthly": 40000,
-      "heavy_daily": 200
+      "monthly": 60000,
+      "heavy_daily": 50
     },
     "default": {
       "daily": 500,
-      "monthly": 5000,
+      "monthly": 15000,
       "heavy_daily": 50
     }
   },
