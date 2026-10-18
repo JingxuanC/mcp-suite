@@ -38,6 +38,7 @@
   .pill.blocked { color: var(--bad); border-color: var(--bad); }
   .pill.ok { color: var(--ok); border-color: var(--ok); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .dash-title { margin: 24px 0 10px; font-size: 11px; color: var(--dim); letter-spacing: 1px; }
   @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
   .btnrow { display: flex; gap: 10px; align-items: center; padding: 12px 16px; flex-wrap: wrap; }
   button { background: var(--accent); color: #14100a; border: none; border-radius: 6px; padding: 7px 18px; font-weight: 600; cursor: pointer; font-size: 13px; }
@@ -153,7 +154,7 @@
   .req-tab b { font-family: var(--mono); font-weight: 600; margin-left: 3px; }
   .req-tab:hover { color: var(--text); background: #0b0d11; }
   .req-tab.on { color: var(--accent); border-color: var(--accent); background: rgba(232,176,75,.08); }
-  .req-filters { display: grid; grid-template-columns: 1fr 88px; gap: 7px; padding: 9px 12px 8px; }
+  .req-filters { display: grid; grid-template-columns: 1fr 108px; gap: 7px; padding: 9px 12px 8px; }
   .req-filters input, .req-filters select {
     width: 100%; box-sizing: border-box; background: #0b0d11; color: var(--text);
     border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 11.5px var(--mono);
@@ -263,19 +264,7 @@
 <main>
   <!-- ============ 总览视图 ============ -->
   <div id="view-main">
-    <div class="cards">
-      <div class="card"><div class="num" id="today_calls">–</div><div class="lbl">今日调用</div></div>
-      <div class="card"><div class="num" id="today_heavy">–</div><div class="lbl">今日重度调用</div></div>
-      <div class="card"><div class="num" id="month_calls">–</div><div class="lbl">本月调用</div></div>
-      <div class="card warn"><div class="num" id="blocks">–</div><div class="lbl">24h 拦截次数</div></div>
-      <div class="card ok"><div class="num" id="success_rate">–</div><div class="lbl">今日成功率</div></div>
-      <div class="card"><div class="num" id="p50">–</div><div class="lbl">今日延迟 p50</div></div>
-      <div class="card"><div class="num" id="p95">–</div><div class="lbl">今日延迟 p95</div></div>
-      <div class="card"><div class="num" id="keys_active">–</div><div class="lbl">今日活跃 key</div></div>
-      <div class="card"><div class="num" id="keys_total">–</div><div class="lbl">库存 key 总数</div></div>
-      <div class="card warn"><div class="num" id="pending_reqs">–</div><div class="lbl">待审批申请</div></div>
-      <div class="card"><div class="num" id="claimable_tokens">–</div><div class="lbl">待领取密钥</div></div>
-    </div>
+
 
     <!-- ============ API key 申请审批 ============ -->
     <section id="sec-requests">
@@ -319,6 +308,22 @@
         申请人凭单号在对应领取页自助领取（只能领一次，取走即从内存抹除）。
       </p>
     </section>
+
+    <div class="dash-title">平台总览</div>
+
+    <div class="cards">
+      <div class="card"><div class="num" id="today_calls">–</div><div class="lbl">今日调用</div></div>
+      <div class="card"><div class="num" id="today_heavy">–</div><div class="lbl">今日重度调用</div></div>
+      <div class="card"><div class="num" id="month_calls">–</div><div class="lbl">本月调用</div></div>
+      <div class="card warn"><div class="num" id="blocks">–</div><div class="lbl">24h 拦截次数</div></div>
+      <div class="card ok"><div class="num" id="success_rate">–</div><div class="lbl">今日成功率</div></div>
+      <div class="card"><div class="num" id="p50">–</div><div class="lbl">今日延迟 p50</div></div>
+      <div class="card"><div class="num" id="p95">–</div><div class="lbl">今日延迟 p95</div></div>
+      <div class="card"><div class="num" id="keys_active">–</div><div class="lbl">今日活跃 key</div></div>
+      <div class="card"><div class="num" id="keys_total">–</div><div class="lbl">库存 key 总数</div></div>
+      <div class="card warn"><div class="num" id="pending_reqs">–</div><div class="lbl">待审批申请</div></div>
+      <div class="card"><div class="num" id="claimable_tokens">–</div><div class="lbl">待领取密钥</div></div>
+    </div>
 
 
     <section>
@@ -1140,8 +1145,8 @@ function reqById(id) {
   return REQ_CACHE.find(r => r.id === id) || null;
 }
 function reqStatusMeta(r) {
-  if (r.status === 'approved' && r.token_pending) return ['paid', '待领取'];
-  if (r.status === 'approved' && r.picked_at) return ['ok', '已领取'];
+  // Approval and pickup are separate signals: the status pill stays "已通过";
+  // the claim badge / card suffix carries 待领取 / 已领取.
   if (r.status === 'approved') return ['ok', '已通过'];
   return REQ_STATUS[r.status] || ['', r.status];
 }
