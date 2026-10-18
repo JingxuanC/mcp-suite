@@ -35,7 +35,7 @@ python3 scripts/set_admin_password.py --list             # 看有哪些账号
 python3 scripts/set_admin_password.py --username ops --disable
 ```
 
-跑测试：`python -m unittest discover -s tests -v`（106 个用例，另见 `scripts/e2e_apply_flow.py`）
+跑测试：`python -m unittest discover -s tests -v`（114 个用例，另见 `scripts/e2e_apply_flow.py`）
 
 ## 管控模型
 
@@ -66,7 +66,8 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
 - 已通过申请显示待领取 / 已领取、mcphub key 名、领取链接，可直接查看待领取 token；
 - 支持改发、复制申请单号/联系方式/领取链接，15 秒自动刷新会保留当前编辑状态。
 
-仍然只调用现有 `/api/requests*`，没有改数据库或审批协议。
+仍然只调用现有 `/api/requests*`；后端为申请单补了 `product` 字段和
+`request_events` 时间线（旧库启动时自动 `ALTER TABLE` 补列并回填，响应字段只增不改）。
 
 ### API key 自助申请 / 审批
 
@@ -91,14 +92,24 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
 |---|---|---|
 | ~~`GET /apply`~~ | — | 已移除，返回 404 并提示去主页（避免两个页面各自漂移） |
 | `GET /api/apply/meta` | 匿名 | 可选分组等元信息 |
-| `POST /api/apply` | 匿名 | 提交申请 → 返回申请单号 `REQ-XXXXXXXX`；按 IP 限流 |
-| `GET /api/apply/<单号>` | 匿名 | 查状态（**不返回密钥**） |
+| `POST /api/apply` | 匿名 | 提交申请 → 返回申请单号 `REQ-XXXXXXXX`；按 IP 限流。可选 `product`（`api` / `alpha-desk`，默认按 purpose 含 `Alpha Desk` 推断） |
+| `GET /api/apply/<单号>` | 匿名 | 查状态（**不返回密钥**）；含 `product` |
 | `POST /api/apply/<单号>/pickup` | 匿名 | 领取密钥 → 返回后**立即从内存抹除** |
-| `GET /api/requests` | 管理 | 申请列表 + 待办数 |
+| `GET /api/requests` | 管理 | 申请列表 + 待办数；每行含 `product` 与 `events` 时间线 |
 | `POST /api/requests/<id>/approve` | 管理 | 通过：建 key + 写档位（`groups`、`tier`） |
 | `POST /api/requests/<id>/reject` | 管理 | 拒绝（`reason` 会展示给申请人） |
 | `POST /api/requests/<id>/reissue` | 管理 | 改发：建新 key + 停用旧 key |
 | `GET /api/requests/<id>/token` | 管理 | 兜底：查看待领取的密钥，人工转发 |
+
+**申请时间线（`request_events`）**
+
+`GET /api/requests` 每行的 `events` 是审计时间线：`submitted` / `approved` /
+`rejected` / `reissued` / `picked-up`，每个事件含 `id`、`ts`、`actor`、`kind`、
+`detail`。顺序固定为**最新在前（id DESC）**，每个申请最多返回 **50 条**。
+管理员操作的 `actor` 是用户名（令牌会话为 `token`），匿名提交与领取记为
+`applicant`。事件只记录产品、分组、key 名等元数据，**绝不写入 token**。
+旧库在启动时自动建表并补 `product` 列（`ALTER TABLE` + 按 purpose 回填一次），
+无需手工迁移。
 
 **两个刻意的设计**
 
