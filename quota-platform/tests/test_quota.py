@@ -1333,6 +1333,33 @@ class RequestProductStoreTest(unittest.TestCase):
         self.assertEqual(listed['REQ-EEEEEEEE'], 'api')
         self.assertEqual(listed['REQ-FFFFFFFF'], 'api')
 
+    def test_retune_migrates_exact_tier_overrides_and_preserves_custom(self):
+        import importlib.util
+        from pathlib import Path as _Path
+        script = _Path(__file__).resolve().parents[1] / "scripts" / "retune_quota_tiers.py"
+        spec = importlib.util.spec_from_file_location("retune_quota_tiers", script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        old_paid = {"daily": 2000, "monthly": 40000, "heavy_daily": 200}
+        old_default = {"daily": 500, "monthly": 5000, "heavy_daily": 50}
+        cfg = {
+            "tiers": {"paid": dict(old_paid), "default": dict(old_default)},
+            "key_overrides": {
+                "auto": {"tier_by_group": {"alpha": dict(old_paid)}},
+                "custom": {"tier_by_group": {"data": {"daily": 20000, "monthly": 399990, "heavy_daily": 200}}},
+                "defaulted": {"tier_by_group": {"other": dict(old_default)}},
+            },
+        }
+        out, msgs = mod.retune(cfg, paid_monthly=60000, paid_heavy=50,
+                               default_monthly=15000, default_heavy=50)
+        self.assertEqual(out["tiers"]["paid"], {"daily": 2000, "monthly": 60000, "heavy_daily": 50})
+        self.assertEqual(out["tiers"]["default"], {"daily": 500, "monthly": 15000, "heavy_daily": 50})
+        self.assertEqual(out["key_overrides"]["auto"]["tier_by_group"]["alpha"],
+                         {"daily": 2000, "monthly": 60000, "heavy_daily": 50})
+        self.assertEqual(out["key_overrides"]["custom"]["tier_by_group"]["data"]["daily"], 20000)
+        self.assertEqual(out["key_overrides"]["defaulted"]["tier_by_group"]["other"]["monthly"], 15000)
+        self.assertEqual(len(msgs), 2)
+
     def test_cleanup_removes_only_exact_paid_overrides_on_free_groups(self):
         import importlib.util
         from pathlib import Path as _Path
