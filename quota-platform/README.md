@@ -35,7 +35,7 @@ python3 scripts/set_admin_password.py --list             # 看有哪些账号
 python3 scripts/set_admin_password.py --username ops --disable
 ```
 
-跑测试：`python -m unittest discover -s tests -v`（116 个用例，另见 `scripts/e2e_apply_flow.py`）
+跑测试：`python -m unittest discover -s tests -v`（117 个用例，另见 `scripts/e2e_apply_flow.py`）
 
 ## 管控模型
 
