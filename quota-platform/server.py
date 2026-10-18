@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS key_requests (
   name           TEXT NOT NULL,             -- 申请人/团队称呼
   contact        TEXT NOT NULL DEFAULT '',
   purpose        TEXT NOT NULL DEFAULT '',
+  product        TEXT NOT NULL DEFAULT 'api', -- api / alpha-desk（旧库由 _migrate 补列并回填）
   want_groups    TEXT NOT NULL DEFAULT '[]',-- 申请人勾选的分组（JSON 数组）
   volume         TEXT NOT NULL DEFAULT '',
   status         TEXT NOT NULL,             -- pending/approved/rejected/revoked
@@ -99,6 +100,18 @@ CREATE TABLE IF NOT EXISTS key_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_keyreq_status ON key_requests(status);
 CREATE INDEX IF NOT EXISTS idx_keyreq_created ON key_requests(created_at);
+
+-- 申请单时间线 / 审计事件。只记录状态与操作者，**不记录任何 token**。
+-- 读取时按 id DESC（最新在前）返回，每个申请最多 50 条。
+CREATE TABLE IF NOT EXISTS request_events (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL,
+  ts         INTEGER NOT NULL,
+  actor      TEXT NOT NULL DEFAULT '',
+  kind       TEXT NOT NULL,           -- submitted/approved/rejected/reissued/picked-up
+  detail     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_reqevents_request ON request_events(request_id);
 """
 
 DEFAULT_CONFIG = {
@@ -137,6 +150,22 @@ DEFAULT_CONFIG = {
                     'factor_daily_compute', 'ml_train_rolling', 'update_data',
                     'forecast_batch'],
 }
+
+# 申请单的「产品」维度：只允许这两个值，默认按 purpose 推断。
+REQUEST_PRODUCTS = ('api', 'alpha-desk')
+
+
+def infer_product(purpose):
+    """purpose 里出现 Alpha Desk（不区分大小写）→ alpha-desk，否则 api。"""
+    return 'alpha-desk' if 'alpha desk' in str(purpose or '').lower() else 'api'
+
+
+def normalize_product(product, purpose=''):
+    """校验产品值；空值按 purpose 推断，非法值不落库（回落到 api）。"""
+    p = str(product or '').strip().lower()
+    if not p:
+        return infer_product(purpose)
+    return p if p in REQUEST_PRODUCTS else 'api'
 
 
 # ---------------------------------------------------------------- 配置
@@ -760,8 +789,24 @@ class QuotaStore:
         conn = sqlite3.connect(path)
         conn.execute('PRAGMA journal_mode=WAL')  # 热路径读写不互锁
         conn.executescript(SCHEMA)
+        self._migrate(conn)
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _migrate(conn):
+        """就地升级旧库（幂等）。
+
+        旧库的 key_requests 没有 product 列：补列后按 purpose 回填一次
+        （含 Alpha Desk → alpha-desk，其余 api）。request_events 由 SCHEMA
+        的 CREATE TABLE IF NOT EXISTS 建好，无需额外动作。
+        """
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(key_requests)').fetchall()}
+        if 'product' not in cols:
+            conn.execute("ALTER TABLE key_requests ADD COLUMN product TEXT NOT NULL DEFAULT 'api'")
+            conn.execute(
+                "UPDATE key_requests SET product='alpha-desk' "
+                "WHERE LOWER(purpose) LIKE '%alpha desk%'")
 
     def _conn(self):
         c = sqlite3.connect(self.path)
@@ -849,13 +894,15 @@ class QuotaStore:
 
     # -- API key 申请单 ------------------------------------------------
 
-    def create_request(self, req_no, name, contact, purpose, want_groups, volume, ip=''):
+    def create_request(self, req_no, name, contact, purpose, want_groups, volume, ip='',
+                       product=''):
+        product = normalize_product(product, purpose)
         with self.lock:
             c = self._conn()
             cur = c.execute(
-                'INSERT INTO key_requests(req_no,name,contact,purpose,want_groups,volume,'
-                'status,created_at,client_ip) VALUES(?,?,?,?,?,?,?,?,?)',
-                (req_no, name, contact or '', purpose or '',
+                'INSERT INTO key_requests(req_no,name,contact,purpose,product,want_groups,volume,'
+                'status,created_at,client_ip) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (req_no, name, contact or '', purpose or '', product,
                  json.dumps(list(want_groups or []), ensure_ascii=False),
                  volume or '', 'pending', int(time.time()), ip or ''))
             rid = cur.lastrowid
@@ -873,6 +920,7 @@ class QuotaStore:
                 d[k] = json.loads(d.get(k) or '[]')
             except (json.JSONDecodeError, TypeError):
                 d[k] = []
+        d['product'] = d.get('product') or 'api'
         return d
 
     def get_request(self, req_no=None, req_id=None):
@@ -926,6 +974,58 @@ class QuotaStore:
                       (int(time.time()), int(req_id)))
             c.commit()
             c.close()
+
+    # -- 申请单时间线 --------------------------------------------------
+
+    @staticmethod
+    def _event_row(r):
+        """只暴露安全字段（不含 request_id 等内部列）。"""
+        return {'id': r['id'], 'ts': r['ts'], 'actor': r['actor'] or '',
+                'kind': r['kind'], 'detail': r['detail'] or ''}
+
+    def add_event(self, request_id, kind, actor='', detail=''):
+        """追加一条审计事件。detail 截断到 500 字，**调用方不得写入 token**。"""
+        with self.lock:
+            c = self._conn()
+            c.execute(
+                'INSERT INTO request_events(request_id,ts,actor,kind,detail) VALUES(?,?,?,?,?)',
+                (int(request_id), int(time.time()), str(actor or '')[:80], str(kind),
+                 str(detail or '')[:500]))
+            c.commit()
+            c.close()
+
+    def request_events(self, request_id, limit=50):
+        """单张申请的事件列表：**最新在前**（id DESC），最多 limit 条。"""
+        limit = max(1, min(int(limit), 200))
+        with self.lock:
+            c = self._conn()
+            rows = c.execute(
+                'SELECT id,ts,actor,kind,detail FROM request_events '
+                'WHERE request_id=? ORDER BY id DESC LIMIT ?',
+                (int(request_id), limit)).fetchall()
+            c.close()
+        return [self._event_row(r) for r in rows]
+
+    def events_for_requests(self, request_ids, limit=50):
+        """批量取事件：{request_id: [event, ...]}，每单**最新在前**，最多 limit 条。"""
+        ids = [int(i) for i in (request_ids or []) if i is not None]
+        if not ids:
+            return {}
+        limit = max(1, min(int(limit), 200))
+        placeholders = ','.join('?' * len(ids))
+        with self.lock:
+            c = self._conn()
+            rows = c.execute(
+                'SELECT id,request_id,ts,actor,kind,detail FROM request_events '
+                'WHERE request_id IN (%s) ORDER BY request_id ASC, id DESC' % placeholders,
+                ids).fetchall()
+            c.close()
+        out = {}
+        for r in rows:
+            lst = out.setdefault(r['request_id'], [])
+            if len(lst) < limit:
+                lst.append(self._event_row(r))
+        return out
 
     # -- 调用流水 ----------------------------------------------------
 
@@ -1888,6 +1988,11 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
                                     'hint': '请留联系方式（邮箱或微信），否则审批通过也无法通知你'})
         purpose = str(body.get('purpose') or '').strip()[:500]
         volume = str(body.get('volume') or '').strip()[:60]
+        product_raw = str(body.get('product') or '').strip().lower()
+        if product_raw and product_raw not in REQUEST_PRODUCTS:
+            return self._json(400, {'error': 'unknown_product',
+                                    'hint': 'product 只能是 %s' % ' / '.join(REQUEST_PRODUCTS)})
+        product = product_raw or infer_product(purpose)
         allowed = list(cfg.get('apply_groups') or [])
         want = body.get('groups') or []
         if not isinstance(want, list):
@@ -1897,10 +2002,14 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return self._json(400, {'error': 'groups_required',
                                     'hint': '请至少选择一个分组（可选：%s）' % ', '.join(allowed)})
         req_no = new_request_no()
-        rid = self.server.store.create_request(req_no, name, contact, purpose, want, volume, ip)
+        rid = self.server.store.create_request(req_no, name, contact, purpose, want, volume, ip,
+                                               product=product)
+        self.server.store.add_event(
+            rid, 'submitted', actor='applicant',
+            detail='product=%s groups=%s' % (product, ','.join(want)))
         self._apply_limiter.record(ip)
         return self._json(200, {
-            'ok': True, 'id': rid, 'req_no': req_no,
+            'ok': True, 'id': rid, 'req_no': req_no, 'product': product,
             'hint': '申请已提交，等待管理员审批。请记下申请单号，审批通过后凭它领取密钥。',
             'poll': 'GET /api/apply/' + req_no,
         })
@@ -1913,7 +2022,8 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         pending_tok = self._pending.peek(req_no)
         out = {
             'req_no': req['req_no'], 'status': req['status'],
-            'name': req['name'], 'want_groups': req['want_groups'],
+            'name': req['name'], 'product': req['product'],
+            'want_groups': req['want_groups'],
             'granted_groups': req['granted_groups'],
             'created_at': req['created_at'], 'decided_at': req['decided_at'],
             'picked_at': req['picked_at'],
@@ -1947,6 +2057,8 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return self._json(410, {'error': 'already_picked_or_expired',
                                     'hint': '密钥已被领取或已过期。请联系管理员重新发放。'})
         self.server.store.mark_picked(req['id'])
+        self.server.store.add_event(req['id'], 'picked-up', actor='applicant',
+                                    detail='key=%s' % (req['mc_key_name'] or ''))
         groups = tok['groups']
         return self._json(200, {
             'ok': True, 'req_no': req_no, 'key_name': tok['key_name'],
@@ -1983,9 +2095,11 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         status = (qs.get('status') or [''])[0] or None
         rows = self.server.store.list_requests(status=status, limit=300)
         pend = self._pending.pending()
+        events = self.server.store.events_for_requests([r['id'] for r in rows], limit=50)
         for r in rows:
             r['token_pending'] = r['req_no'] in pend
             r['token_age_sec'] = (pend.get(r['req_no']) or {}).get('age_sec')
+            r['events'] = events.get(r['id'], [])   # 时间线：最新在前，最多 50 条
         return self._json(200, {
             'requests': rows,
             'pending_count': self.server.store.count_pending_requests(),
@@ -2071,6 +2185,8 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         self.server.store.decide_request(rid, 'approved', decided_by=self._actor(),
                                          mc_key_id=kid, mc_key_name=kname,
                                          granted_groups=groups)
+        self.server.store.add_event(int(rid), 'approved', actor=self._actor(),
+                                    detail='key=%s groups=%s' % (kname, ','.join(groups)))
         return self._json(200, {
             'ok': True, 'req_no': req['req_no'], 'key_name': kname, 'key_id': kid,
             'groups': groups, 'tier': tier, 'warning': warn or None,
@@ -2092,6 +2208,8 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         reason = str(body.get('reason') or '').strip()[:300]
         self.server.store.decide_request(rid, 'rejected', decided_by=self._actor(),
                                          reject_reason=reason)
+        self.server.store.add_event(int(rid), 'rejected', actor=self._actor(),
+                                    detail=reason)
         self._pending.drop(req['req_no'])
         return self._json(200, {'ok': True, 'req_no': req['req_no'], 'status': 'rejected'})
 
@@ -2138,6 +2256,8 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         self.server.store.decide_request(rid, 'approved', decided_by=self._actor(),
                                          mc_key_id=kid, mc_key_name=kname,
                                          granted_groups=groups)
+        self.server.store.add_event(int(rid), 'reissued', actor=self._actor(),
+                                    detail='key=%s groups=%s' % (kname, ','.join(groups)))
         return self._json(200, {'ok': True, 'req_no': req['req_no'], 'key_name': kname,
                                 'key_id': kid, 'groups': groups, 'tier': tier,
                                 'old_key_note': old_note, 'warning': warn or None,
