@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS key_requests (
   name           TEXT NOT NULL,             -- 申请人/团队称呼
   contact        TEXT NOT NULL DEFAULT '',
   purpose        TEXT NOT NULL DEFAULT '',
-  product        TEXT NOT NULL DEFAULT 'api', -- api / alpha-desk（旧库由 _migrate 补列并回填）
+  product        TEXT NOT NULL DEFAULT 'api', -- api / alpha-desk / memory（旧库由 _migrate 补列并回填）
   want_groups    TEXT NOT NULL DEFAULT '[]',-- 申请人勾选的分组（JSON 数组）
   volume         TEXT NOT NULL DEFAULT '',
   status         TEXT NOT NULL,             -- pending/approved/rejected/revoked
@@ -160,13 +160,22 @@ DEFAULT_CONFIG = {
                     'forecast_batch'],
 }
 
-# 申请单的「产品」维度：只允许这两个值，默认按 purpose 推断。
-REQUEST_PRODUCTS = ('api', 'alpha-desk')
+# 申请单的「产品」维度：
+#   api        — 通用 MCP API Key（匿名申请/领取，审批后建 mcphub key）
+#   alpha-desk — Alpha Desk Pro（网站登录绑定，审批后建 mcphub key）
+#   memory     — 云端记忆 ¥99/月（网站登录绑定，审批后不建 mcphub key，
+#                由网站 /api/memory/claim 签发 cm_ 记忆 token）
+REQUEST_PRODUCTS = ('api', 'alpha-desk', 'memory')
 
 
 def infer_product(purpose):
-    """purpose 里出现 Alpha Desk（不区分大小写）→ alpha-desk，否则 api。"""
-    return 'alpha-desk' if 'alpha desk' in str(purpose or '').lower() else 'api'
+    """purpose 里出现 Alpha Desk → alpha-desk，云端记忆 → memory，否则 api。"""
+    text = str(purpose or '').lower()
+    if 'alpha desk' in text:
+        return 'alpha-desk'
+    if '云端记忆' in text or 'cloud memory' in text:
+        return 'memory'
+    return 'api'
 
 
 def normalize_product(product, purpose=''):
@@ -2134,7 +2143,12 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         })
 
     def _apply_submit(self):
-        """申请人提交 → 建单，返回申请单号。匿名，按 IP 限流。"""
+        """申请人提交 → 建单，返回申请单号。匿名，按 IP 限流。
+
+        product=memory 例外：必须由网站代理带合法 apply HMAC，申请单直接
+        绑定到网站账号；api 保持匿名，alpha-desk 仍允许匿名建单（领取时
+        再强制绑定，兼容旧流程）。
+        """
         cfg = self.server.cfg.current()
         ip = self._client_ip()
         wait = self._apply_limiter.check(ip)
@@ -2160,15 +2174,26 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         product = product_raw or infer_product(purpose)
         # 申请时的账号绑定（可选）：网站代理会带 HMAC 身份头；CLI/匿名
         # 申请仍允许，但 Alpha Desk 领取时会要求先绑定（见 _apply_pickup）。
+        # 云端记忆没有可独立交付的线上凭据之外的东西，必须在申请时就绑定。
         bound_user_id, ident_err = self._verify_claim_identity('apply')
         if ident_err:
             return self._identity_error_response(ident_err)
+        if product == 'memory' and not bound_user_id:
+            return self._json(401, {
+                'error': 'login_required',
+                'hint': '云端记忆申请需要先用 GitHub 登录网站，申请单会绑定到你的账号。',
+            })
         allowed = list(cfg.get('apply_groups') or [])
         want = body.get('groups') or []
         if not isinstance(want, list):
             want = []
         want = [g for g in want if g in allowed]
-        if not want:
+        if product == 'memory':
+            # 记忆产品审批后不建 mcphub key；want_groups 仅作管理台展示。
+            want = [g for g in want if g == 'memory']
+            if not want and 'memory' in allowed:
+                want = ['memory']
+        elif not want:
             return self._json(400, {'error': 'groups_required',
                                     'hint': '请至少选择一个分组（可选：%s）' % ', '.join(allowed)})
         req_no = new_request_no()
@@ -2180,7 +2205,10 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             detail='product=%s groups=%s binding=%s' % (product, ','.join(want), binding))
         self._apply_limiter.record(ip)
         hint = '申请已提交，等待管理员审批。请记下申请单号，审批通过后凭它领取密钥。'
-        if product == 'alpha-desk' and not bound_user_id:
+        if product == 'memory':
+            hint = ('云端记忆申请已提交，等待管理员审批。请记下申请单号；通过后回到 '
+                    '/apply?product=memory 登录领取记忆密钥（只显示一次）。')
+        elif product == 'alpha-desk' and not bound_user_id:
             hint += ' 本次申请未绑定网站账号；Alpha Desk claim 前需要管理员绑定。'
         return self._json(200, {
             'ok': True, 'id': rid, 'req_no': req_no, 'product': product,
@@ -2209,7 +2237,20 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         if req['status'] == 'rejected':
             out['reject_reason'] = req['reject_reason']
         if req['status'] == 'approved':
-            if pending_tok and req['product'] == 'alpha-desk' and not bound \
+            if req['product'] == 'memory':
+                # 云端记忆没有待领取的 mcphub token：审批通过即可由网站
+                # /api/memory/claim 在登录态下签发 cm_ token。
+                if not bound:
+                    out['claimable'] = False
+                    out['binding_required'] = True
+                    out['hint'] = '该申请单尚未绑定网站账号，请联系管理员在管理台绑定后再领取。'
+                elif req['picked_at']:
+                    out['claimable'] = False
+                    out['hint'] = '记忆密钥已领取。若丢失，请联系管理员处理。'
+                else:
+                    out['claimable'] = True
+                    out['hint'] = '审批已通过，请用申请时的 GitHub 账号登录 /apply?product=memory 领取记忆密钥（只能领一次）。'
+            elif pending_tok and req['product'] == 'alpha-desk' and not bound \
                     and not self._legacy_claim_allowed():
                 out['claimable'] = False
                 out['binding_required'] = True
@@ -2233,6 +2274,9 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         身份规则（审计 P1-1：不能仅凭 reqNo 领走 license 里的 cloud_key）：
           - product=alpha-desk：必须带合法的 pickup HMAC；申请单必须已绑定
             同一 user id。迁移期 ALPHA_LEGACY_CLAIM=1 允许首次领取时绑定。
+          - product=memory：必须带合法的 pickup HMAC，且申请单在提交时就已
+            绑定同一个 user id；不返回云端 token（网站登录态签发 cm_ token），
+            这里只把申请单标记为已领取，防止重复领取。
           - product=api：保留旧的匿名领取（通用 API key 页面），但若带了
             身份头则校验；已绑定的单不接受其他账号。
         """
@@ -2265,6 +2309,22 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
                         'hint': '该申请单尚未绑定网站账号，请联系管理员绑定后再领取。',
                     })
                 newly_bound = True
+        elif req['product'] == 'memory':
+            if not user_id:
+                return self._json(403, {
+                    'error': 'login_required',
+                    'hint': '云端记忆领取只能在网站登录态下发起；不能仅凭申请单号公网领取。',
+                })
+            if not bound:
+                return self._json(409, {
+                    'error': 'claim_unbound',
+                    'hint': '该申请单尚未绑定网站账号，请联系管理员绑定后再领取。',
+                })
+            if bound != user_id:
+                return self._json(403, {
+                    'error': 'request_bound_to_other_user',
+                    'hint': '该申请单已绑定其他网站账号，不能领取。',
+                })
         else:
             if user_id:
                 if bound and bound != user_id:
@@ -2286,6 +2346,30 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             bound = user_id
             self.server.store.add_event(req['id'], 'bound', actor='applicant',
                                         detail='claim-time bind tenant=u_%s' % user_id)
+
+        if req['product'] == 'memory':
+            # 记忆 token 由网站的 /api/memory/claim 在登录态下用 cm_ 前缀
+            # 生成并投影到 cloud.json；quota 只做「申请单只能领一次」的登记。
+            if req['picked_at']:
+                return self._json(410, {
+                    'error': 'already_picked_or_expired',
+                    'hint': '记忆密钥已被领取。若丢失，请联系管理员处理。',
+                })
+            self.server.store.mark_picked(req['id'])
+            self.server.store.add_event(
+                req['id'], 'picked-up', actor='applicant',
+                detail='product=memory issuer=website binding=account')
+            tenant = 'u_' + bound
+            return self._json(200, {
+                'ok': True, 'req_no': req_no, 'product': 'memory',
+                'key_name': '', 'key_id': '',
+                'token': '', 'groups': ['memory'],
+                'tenant': tenant,
+                'binding': 'account',
+                'token_issuer': 'website',
+                'memory_token_issued': True,
+                'warning': '云端记忆密钥由网站登录态签发；本响应只确认领取登记，不包含 token。',
+            })
 
         tok = self._pending.pop(req_no)      # ← 取走即删
         if not tok:
@@ -2335,6 +2419,9 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         status = (qs.get('status') or [''])[0] or None
         rows = self.server.store.list_requests(status=status, limit=300)
         pend = self._pending.pending()
+        memory_claimable = sum(
+            1 for r in rows
+            if r['product'] == 'memory' and r['status'] == 'approved' and not r['picked_at'])
         events = self.server.store.events_for_requests([r['id'] for r in rows], limit=50)
         for r in rows:
             r['token_pending'] = r['req_no'] in pend
@@ -2343,7 +2430,7 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         return self._json(200, {
             'requests': rows,
             'pending_count': self.server.store.count_pending_requests(),
-            'claimable_count': len(pend),
+            'claimable_count': len(pend) + memory_claimable,
             'apply_groups': list(cfg.get('apply_groups') or []),
             'tiers': sorted((cfg.get('tiers') or {}).keys()),
             'default_tier': cfg.get('apply_default_tier') or 'paid',
@@ -2402,8 +2489,27 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         if not req:
             return self._json(404, {'error': 'not_found'})
         if req['status'] == 'approved':
-            return self._json(409, {'error': 'already_approved',
-                                    'hint': '该申请已通过。要换分组/档位请用「改发」。'})
+            hint = ('该申请已通过。' +
+                    ('记忆密钥由网站登录态签发，无需改发。'
+                     if req['product'] == 'memory' else '要换分组/档位请用「改发」。'))
+            return self._json(409, {'error': 'already_approved', 'hint': hint})
+        if req['product'] == 'memory':
+            # 云端记忆不需要 mcphub key：只标记 approved，mc_key_* 留空。
+            # 真正的 cm_ token 由网站 /api/memory/claim 在登录态下签发。
+            groups = ['memory']
+            self.server.store.decide_request(rid, 'approved', decided_by=self._actor(),
+                                             mc_key_id='', mc_key_name='',
+                                             granted_groups=groups)
+            self.server.store.add_event(int(rid), 'approved', actor=self._actor(),
+                                        detail='product=memory no-key')
+            return self._json(200, {
+                'ok': True, 'req_no': req['req_no'], 'product': 'memory',
+                'key_name': '', 'key_id': '', 'groups': groups,
+                'tier': None, 'warning': None,
+                'hint': ('已通过，未创建 mcphub key。请通知申请人用申请时的 GitHub 账号'
+                         '登录 /apply?product=memory 领取记忆密钥（只能领一次）。'),
+                'access': None,
+            })
         allowed = set(cfg.get('apply_groups') or [])
         groups = body.get('groups') or req['want_groups'] or []
         groups = [g for g in groups if g in allowed]
@@ -2502,6 +2608,12 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         req = self.server.store.get_request(req_id=rid)
         if not req:
             return self._json(404, {'error': 'not_found'})
+        if req['product'] == 'memory':
+            return self._json(409, {
+                'error': 'reissue_not_supported',
+                'hint': ('云端记忆申请没有可改发的 mcphub key。如需重新签发记忆 token，'
+                         '请在网站控制台处理或联系管理员。'),
+            })
         allowed = set(cfg.get('apply_groups') or [])
         groups = body.get('groups') or req['granted_groups'] or req['want_groups'] or []
         groups = [g for g in groups if g in allowed]

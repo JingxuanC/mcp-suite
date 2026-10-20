@@ -1382,6 +1382,123 @@ class KeyRequestFlowTest(unittest.TestCase):
         s, st = self.call('GET', '/api/apply/' + req_no)
         self.assertEqual(st['binding'], 'account')
 
+    # ── 云端记忆 product=memory ─────────────────────────────────────
+
+    def _apply_memory(self, user_id='user-a', product='memory',
+                      purpose='云端记忆 ¥99/月'):
+        headers = self.identity('apply', user_id) if user_id else {}
+        body = {'name': '记忆客户', 'contact': 'm@b.c', 'purpose': purpose,
+                'groups': ['data', 'memory']}
+        if product is not None:
+            body['product'] = product
+        return self.call('POST', '/api/apply', body, headers)
+
+    def test_memory_apply_requires_bound_website_identity(self):
+        # 不带 HMAC 身份头：拒绝建单，避免出现无法安全领取的记忆申请。
+        s, b = self._apply_memory(user_id=None)
+        self.assertEqual((s, b['error']), (401, 'login_required'))
+
+        # 合法身份：绑定账号，product=memory，分组只保留 memory。
+        s, b = self._apply_memory(user_id='user-a')
+        self.assertEqual(s, 200, b)
+        self.assertEqual(b['product'], 'memory')
+        self.assertEqual(b['binding'], 'account')
+        req_no, rid = b['req_no'], b['id']
+
+        s, st = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(st['product'], 'memory')
+        self.assertEqual(st['binding'], 'account')
+        self.assertEqual(st['want_groups'], ['memory'])
+
+        s, rows = self.call('GET', '/api/requests', headers=self.ADMIN)
+        row = [r for r in rows['requests'] if r['id'] == rid][0]
+        self.assertEqual(row['product'], 'memory')
+        self.assertEqual(row['tenant'], 'u_user-a')
+
+        # purpose 不含 product 字段时也能推断出 memory（仍需身份）。
+        s, b = self._apply_memory(user_id='user-b', product=None,
+                                  purpose='云端记忆 续费')
+        self.assertEqual(s, 200, b)
+        self.assertEqual(b['product'], 'memory')
+
+    def test_memory_approve_skips_mcphub_and_pickup_is_website_only(self):
+        os.environ['ALPHA_LEGACY_CLAIM'] = '0'
+        s, b = self._apply_memory(user_id='user-a')
+        self.assertEqual(s, 200, b)
+        req_no, rid = b['req_no'], b['id']
+
+        before = len(MockMcphubKeys.calls)
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid,
+                         {'groups': ['alpha'], 'tier': 'paid'}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        self.assertEqual(b['product'], 'memory')
+        self.assertEqual(b['key_name'], '')
+        self.assertEqual(b['key_id'], '')
+        self.assertEqual(b['groups'], ['memory'])
+        # memory 审批不建 mcphub key，也不写 key_overrides。
+        self.assertEqual(len(MockMcphubKeys.calls), before)
+        self.assertEqual(self.cfg.current().get('key_overrides') or {}, {})
+
+        s, st = self.call('GET', '/api/apply/' + req_no)
+        self.assertTrue(st['claimable'])
+        self.assertEqual(st['product'], 'memory')
+        s, rows = self.call('GET', '/api/requests', headers=self.ADMIN)
+        self.assertEqual(rows['claimable_count'], 1)
+
+        # 公网仅凭 reqNo 不能领取。
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
+        self.assertEqual((s, b['error']), (403, 'login_required'))
+        # 其他登录用户也不能领取。
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-b', req_no))
+        self.assertEqual((s, b['error']), (403, 'request_bound_to_other_user'))
+
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-a', req_no))
+        self.assertEqual(s, 200, b)
+        self.assertEqual(b['product'], 'memory')
+        self.assertEqual(b['token'], '')
+        self.assertEqual(b['tenant'], 'u_user-a')
+        self.assertEqual(b['binding'], 'account')
+        self.assertEqual(b['token_issuer'], 'website')
+        self.assertIsNone(self.srv.pending.peek(req_no))
+
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-a', req_no))
+        self.assertEqual((s, b['error']), (410, 'already_picked_or_expired'))
+
+        s, st = self.call('GET', '/api/apply/' + req_no)
+        self.assertFalse(st['claimable'])
+        self.assertTrue(st['picked_at'])
+        s, rows = self.call('GET', '/api/requests', headers=self.ADMIN)
+        self.assertEqual(rows['claimable_count'], 0)
+        row = [r for r in rows['requests'] if r['id'] == rid][0]
+        self.assertFalse(row['token_pending'])
+        by_kind = {e['kind']: e for e in row['events']}
+        self.assertEqual(by_kind['approved']['detail'], 'product=memory no-key')
+        self.assertEqual(by_kind['picked-up']['detail'],
+                         'product=memory issuer=website binding=account')
+
+    def test_memory_reject_and_reissue_semantics(self):
+        s, b = self._apply_memory(user_id='user-c')
+        self.assertEqual(s, 200, b)
+        req_no, rid = b['req_no'], b['id']
+
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid, {}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        s, b = self.call('POST', '/api/requests/%d/reissue' % rid, {}, self.ADMIN)
+        self.assertEqual((s, b['error']), (409, 'reissue_not_supported'))
+
+        s, b = self._apply_memory(user_id='user-d')
+        req_no2, rid2 = b['req_no'], b['id']
+        s, b = self.call('POST', '/api/requests/%d/reject' % rid2,
+                         {'reason': '用途不明确'}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        s, st = self.call('GET', '/api/apply/' + req_no2)
+        self.assertEqual(st['product'], 'memory')
+        self.assertEqual(st['status'], 'rejected')
+        self.assertEqual(st['reject_reason'], '用途不明确')
+
 
 LEGACY_KEY_REQUESTS = """
 CREATE TABLE key_requests (
