@@ -8,6 +8,7 @@ tools/list 不计次、陌生 key 落 default 档、分组路径识别、
 """
 
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -908,10 +909,27 @@ class KeyRequestFlowTest(unittest.TestCase):
         self.srv.throttle = qp.LoginThrottle()
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.port = self.srv.server_address[1]
+        # 默认迁移窗口打开，旧的匿名 pickup 用例保持可跑；新用例显式关掉。
+        self._old_secret = os.environ.get('ALPHA_CLAIM_SECRET')
+        self._old_legacy = os.environ.get('ALPHA_LEGACY_CLAIM')
+        os.environ['ALPHA_CLAIM_SECRET'] = 'test-claim-secret'
+        os.environ['ALPHA_LEGACY_CLAIM'] = '1'
 
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
+        for key, old in (('ALPHA_CLAIM_SECRET', self._old_secret),
+                         ('ALPHA_LEGACY_CLAIM', self._old_legacy)):
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+    def identity(self, action, user_id, req_no=''):
+        ts = str(int(time.time()))
+        msg = 'alpha-desk:v1:%s:%s:%s:%s' % (action, user_id, req_no or '-', ts)
+        sig = hmac.new(b'test-claim-secret', msg.encode('utf-8'), hashlib.sha256).hexdigest()
+        return {'X-Alpha-User-Id': user_id, 'X-Alpha-User-Ts': ts, 'X-Alpha-User-Sig': sig}
 
     def call(self, method, path, body=None, headers=None):
         c = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
@@ -1213,17 +1231,20 @@ class KeyRequestFlowTest(unittest.TestCase):
         s, b = self.call('POST', '/api/requests/%d/approve' % rid,
                          {'groups': ['alpha'], 'tier': 'paid'}, self.ADMIN)
         self.assertEqual(s, 200, b)
-        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
-        self.assertEqual(s, 200)
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-a', req_no))
+        self.assertEqual(s, 200, b)
         self.assertTrue(b['token'].startswith('mcphub_'))
 
         s, b = self.call('GET', '/api/requests', headers=self.ADMIN)
         row = [r for r in b['requests'] if r['id'] == rid][0]
         kinds = [e['kind'] for e in row['events']]
-        self.assertEqual(kinds, ['picked-up', 'approved', 'submitted'])  # 最新在前
+        # 迁移窗口下，未绑定单在首次领取时会多一条 bound 事件。
+        self.assertEqual(kinds, ['picked-up', 'bound', 'approved', 'submitted'])  # 最新在前
         by_kind = {e['kind']: e for e in row['events']}
         self.assertEqual(by_kind['submitted']['actor'], 'applicant')
         self.assertEqual(by_kind['picked-up']['actor'], 'applicant')
+        self.assertEqual(by_kind['bound']['actor'], 'applicant')
         self.assertEqual(by_kind['approved']['actor'], 'token')
         self.assertIn('groups=alpha', by_kind['approved']['detail'])
         # 事件里绝不出现 token
@@ -1256,6 +1277,112 @@ class KeyRequestFlowTest(unittest.TestCase):
         self.assertNotIn('mcphub_', json.dumps(row['events'], ensure_ascii=False))
 
 
+    def _apply_alpha(self, user_id=None, groups=('alpha', 'memory'), bad_sig=False):
+        headers = {}
+        if user_id:
+            headers = self.identity('apply', user_id)
+            if bad_sig:
+                headers['X-Alpha-User-Sig'] = '0' * 64
+        s, b = self.call('POST', '/api/apply', {
+            'name': 'Alpha 客户', 'contact': 'a@b.c',
+            'purpose': 'Alpha Desk Pro', 'product': 'alpha-desk',
+            'groups': list(groups),
+        }, headers)
+        return s, b
+
+    def test_alpha_desk_apply_binds_and_pickup_requires_same_user(self):
+        os.environ['ALPHA_LEGACY_CLAIM'] = '0'
+        s, b = self._apply_alpha(user_id='user-a')
+        self.assertEqual(s, 200, b)
+        self.assertEqual(b['binding'], 'account')
+        req_no, rid = b['req_no'], b['id']
+
+        s, st = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(st['binding'], 'account')
+
+        s, b = self.call('POST', '/api/requests/%d/approve' % rid,
+                         {'groups': ['alpha', 'memory'], 'tier': 'paid'}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+
+        # 仅凭 reqNo（无身份头）不能领
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
+        self.assertEqual((s, b['error']), (403, 'login_required'))
+
+        # 另一个登录用户也不能领
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-b', req_no))
+        self.assertEqual((s, b['error']), (403, 'request_bound_to_other_user'))
+
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-a', req_no))
+        self.assertEqual(s, 200, b)
+        self.assertTrue(b['token'].startswith('mcphub_'))
+        self.assertEqual(b['tenant'], 'u_user-a')
+        self.assertEqual(b['binding'], 'account')
+
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-a', req_no))
+        self.assertEqual((s, b['error']), (410, 'already_picked_or_expired'))
+
+    def test_unbound_alpha_desk_is_not_claimable_by_default(self):
+        os.environ['ALPHA_LEGACY_CLAIM'] = '0'
+        s, b = self._apply_alpha(user_id=None)
+        self.assertEqual(s, 200, b)
+        self.assertEqual(b['binding'], 'anonymous')
+        req_no, rid = b['req_no'], b['id']
+        self.call('POST', '/api/requests/%d/approve' % rid,
+                  {'groups': ['alpha'], 'tier': 'paid'}, self.ADMIN)
+        s, st = self.call('GET', '/api/apply/' + req_no)
+        self.assertFalse(st['claimable'])
+        self.assertTrue(st.get('binding_required'))
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-a', req_no))
+        self.assertEqual((s, b['error']), (409, 'claim_unbound'))
+
+    def test_admin_can_bind_legacy_request_then_user_can_pickup(self):
+        os.environ['ALPHA_LEGACY_CLAIM'] = '0'
+        s, b = self._apply_alpha(user_id=None)
+        req_no, rid = b['req_no'], b['id']
+        s, b = self.call('POST', '/api/requests/%d/bind' % rid,
+                         {'user_id': 'user-a'}, self.ADMIN)
+        self.assertEqual(s, 200, b)
+        self.assertEqual(b['tenant'], 'u_user-a')
+        self.call('POST', '/api/requests/%d/approve' % rid,
+                  {'groups': ['alpha']}, self.ADMIN)
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-a', req_no))
+        self.assertEqual(s, 200, b)
+
+    def test_bad_identity_signature_is_rejected(self):
+        s, b = self._apply_alpha(user_id='user-a', bad_sig=True)
+        self.assertEqual((s, b['error']), (403, 'identity_mismatch'))
+
+    def test_api_product_pickup_stays_anonymous(self):
+        s, b = self.call('POST', '/api/apply', {
+            'name': 'API 客户', 'contact': 'a@b.c',
+            'purpose': '普通接入', 'product': 'api', 'groups': ['data'],
+        })
+        self.assertEqual(s, 200, b)
+        req_no, rid = b['req_no'], b['id']
+        self.call('POST', '/api/requests/%d/approve' % rid,
+                  {'groups': ['data']}, self.ADMIN)
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no)
+        self.assertEqual(s, 200, b)
+        self.assertTrue(b['token'].startswith('mcphub_'))
+
+    def test_legacy_window_binds_on_first_pickup(self):
+        os.environ['ALPHA_LEGACY_CLAIM'] = '1'
+        s, b = self._apply_alpha(user_id=None)
+        req_no, rid = b['req_no'], b['id']
+        self.call('POST', '/api/requests/%d/approve' % rid,
+                  {'groups': ['alpha']}, self.ADMIN)
+        s, b = self.call('POST', '/api/apply/%s/pickup' % req_no,
+                         headers=self.identity('pickup', 'user-a', req_no))
+        self.assertEqual(s, 200, b)
+        s, st = self.call('GET', '/api/apply/' + req_no)
+        self.assertEqual(st['binding'], 'account')
+
+
 LEGACY_KEY_REQUESTS = """
 CREATE TABLE key_requests (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1277,8 +1404,6 @@ CREATE TABLE key_requests (
   client_ip      TEXT NOT NULL DEFAULT ''
 );
 """
-
-
 class RequestProductStoreTest(unittest.TestCase):
     """product 列的就地迁移/回填，以及 Store 层的读写与事件顺序。"""
 
@@ -1400,6 +1525,74 @@ class RequestProductStoreTest(unittest.TestCase):
         bulk = store.events_for_requests([rid], limit=3)
         self.assertEqual([e['kind'] for e in bulk[rid]], ['e54', 'e53', 'e52'])
         self.assertEqual(store.events_for_requests([]), {})
+
+
+class CloudMemoryPreflightTest(unittest.TestCase):
+    """P0-2：tokens 目录缺失/为空/损坏必须被启动前检查拦住。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._old = os.environ.pop('CAUSAL_MEMORY_ALLOW_OPEN', None)
+
+    def tearDown(self):
+        if self._old is not None:
+            os.environ['CAUSAL_MEMORY_ALLOW_OPEN'] = self._old
+
+    def _write(self, name, body):
+        path = os.path.join(self.tmp.name, name)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(body)
+        return path
+
+    def test_missing_and_empty_directories_fail(self):
+        ok, errors, _warnings, count, _files = qp.check_cloud_memory_tokens(self.tmp.name)
+        self.assertFalse(ok)
+        self.assertEqual(count, 0)
+        self.assertTrue(any('没有 *.json' in e for e in errors))
+
+        empty = os.path.join(self.tmp.name, 'empty')
+        os.makedirs(empty)
+        ok, errors, _warnings, _count, _files = qp.check_cloud_memory_tokens(empty)
+        self.assertFalse(ok)
+        self.assertTrue(any('没有 *.json' in e for e in errors))
+
+    def test_valid_map_passes_and_corrupt_map_fails(self):
+        self._write('tokens.json', json.dumps({'sha256:' + 'a' * 64: 'u_user'}))
+        ok, errors, _warnings, count, _files = qp.check_cloud_memory_tokens(self.tmp.name)
+        self.assertTrue(ok, errors)
+        self.assertEqual(count, 1)
+
+        self._write('cloud.json', '{broken')
+        ok, errors, _warnings, _count, _files = qp.check_cloud_memory_tokens(self.tmp.name)
+        self.assertFalse(ok)
+        self.assertTrue(any('不可解析' in e for e in errors))
+
+    def test_allow_open_is_an_error_unless_explicitly_permitted(self):
+        self._write('tokens.json', json.dumps({'k': 'u_user'}))
+        os.environ['CAUSAL_MEMORY_ALLOW_OPEN'] = '1'
+        ok, errors, _warnings, _count, _files = qp.check_cloud_memory_tokens(self.tmp.name)
+        self.assertFalse(ok)
+        self.assertTrue(any('ALLOW_OPEN' in e for e in errors))
+        ok, _errors, _warnings, _count, _files = qp.check_cloud_memory_tokens(
+            self.tmp.name, allow_open=True)
+        self.assertTrue(ok)
+
+    def test_preflight_cli_exit_codes(self):
+        self._write('tokens.json', json.dumps({'k': 'u_user'}))
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              'scripts', 'preflight_cloud_memory.py')
+        import subprocess
+        good = subprocess.run([sys.executable, script, '--tokens-dir', self.tmp.name,
+                               '--skip-probe'], capture_output=True, text=True)
+        self.assertEqual(good.returncode, 0, good.stderr)
+        empty = os.path.join(self.tmp.name, 'empty')
+        os.makedirs(empty)
+        bad = subprocess.run([sys.executable, script, '--tokens-dir', empty,
+                              '--skip-probe'], capture_output=True, text=True)
+        self.assertEqual(bad.returncode, 1, bad.stderr)
+        self.assertNotIn('cm_', good.stdout + good.stderr)
+
 
 
 if __name__ == '__main__':

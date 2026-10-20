@@ -96,7 +96,12 @@ CREATE TABLE IF NOT EXISTS key_requests (
   mc_key_name    TEXT NOT NULL DEFAULT '',  -- mcphub 里的 key name（也是配额 key_name）
   granted_groups TEXT NOT NULL DEFAULT '[]',
   picked_at      INTEGER,                   -- 领取时间（NULL = 未领取）
-  client_ip      TEXT NOT NULL DEFAULT ''
+  client_ip      TEXT NOT NULL DEFAULT '',
+  -- 网站账号绑定：申请时由 /api/key-request 代理带 HMAC 身份头写入，
+  -- 或管理员用 /api/requests/<id>/bind 绑定。Alpha Desk 领取必须命中它。
+  bound_user_id  TEXT NOT NULL DEFAULT '',
+  tenant         TEXT NOT NULL DEFAULT '',  -- u_<user_id>（未绑定为空）
+  claim_bound_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_keyreq_status ON key_requests(status);
 CREATE INDEX IF NOT EXISTS idx_keyreq_created ON key_requests(created_at);
@@ -133,6 +138,9 @@ DEFAULT_CONFIG = {
     'apply_rate_hour': 3,                      # 同 IP 每小时申请上限
     'apply_rate_day': 10,                      # 同 IP 每天申请上限
     'apply_pickup_hours': 168,                 # 审批通过后未领取则作废（默认 7 天）
+    'claim_identity_ttl': 300,                 # 网站 HMAC 身份头时间窗（秒）
+    'cloud_memory_tokens_path': '',            # 可选：启动前检查 CAUSAL_MEMORY_TOKENS_FILE
+    'cloud_memory_strict': False,              # true = 检查失败拒绝启动
     'mcp_settings_path': '/mnt/mcp_settings.json',  # 只读挂载 mcphub 的配置文件
     'log_retention_days': 30,                  # 调用流水保留天数（启动时 + 每小时清理）
     'groups': {                                # 路由路径段 → 套餐档
@@ -669,6 +677,71 @@ class PendingTokens:
             self._d.pop(k, None)
 
 
+def _truthy_env(name):
+    return (os.environ.get(name) or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def check_cloud_memory_tokens(path, allow_open=False):
+    """启动前检查 causal-memory 的 tokens 目录。
+
+    Rust 侧在 tokens 目录缺失/为空/不可解析时是 **fail-open**（auth=open 共享库），
+    本检查确保部署脚本在启动前就能发现这种配置错误。返回
+    ``(ok, errors, warnings, entry_count, files)``。
+    """
+    errors, warnings, files = [], [], []
+    if _truthy_env('CAUSAL_MEMORY_ALLOW_OPEN') and not allow_open:
+        errors.append('CAUSAL_MEMORY_ALLOW_OPEN=1 已设置：/mcp 会以 open 模式服务共享库')
+    if not path:
+        errors.append('未提供 tokens 目录（CAUSAL_MEMORY_TOKENS_FILE / cloud_memory_tokens_path）')
+        return False, errors, warnings, 0, files
+    if not os.path.isdir(path):
+        errors.append('tokens 目录不存在或不是目录: %s' % path)
+        return False, errors, warnings, 0, files
+    try:
+        names = sorted(n for n in os.listdir(path) if n.endswith('.json'))
+    except OSError as e:
+        errors.append('tokens 目录不可读: %s (%s)' % (path, e))
+        return False, errors, warnings, 0, files
+    if not names:
+        errors.append('tokens 目录里没有 *.json 文件: %s' % path)
+        return False, errors, warnings, 0, files
+    seen = {}
+    total = 0
+    for name in names:
+        fp = os.path.join(path, name)
+        files.append(fp)
+        try:
+            if os.path.getsize(fp) > 10 * 1024 * 1024:
+                errors.append('tokens 文件过大，拒绝解析: %s' % name)
+                continue
+            with open(fp, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            errors.append('tokens 文件不可解析: %s (%s)' % (name, e))
+            continue
+        if not isinstance(data, dict):
+            errors.append('tokens 文件不是 JSON 对象: %s' % name)
+            continue
+        if not data:
+            warnings.append('tokens 文件为空对象: %s' % name)
+        for key, tenant in data.items():
+            if not isinstance(key, str) or not key:
+                errors.append('tokens 文件存在空 key: %s' % name)
+                continue
+            if not isinstance(tenant, str) or not tenant:
+                # Never echo key material (it may be a real bearer token).
+                errors.append('tokens 文件 tenant 非字符串: %s' % name)
+                continue
+            if key in seen:
+                warnings.append('重复 token key（tenant 解析不确定）: %s vs %s'
+                                % (seen[key], name))
+            seen[key] = name
+            total += 1
+    if total == 0:
+        errors.append('tokens 目录没有任何有效条目: %s' % path)
+    return (not errors), errors, warnings, total, files
+
+
 def new_request_no():
     """申请单号：``REQ-`` + 8 位无歧义字符（32 字母表 ≈ 40 bit，不可枚举）。"""
     alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'  # 去掉 I/O/0/1
@@ -808,6 +881,14 @@ class QuotaStore:
             conn.execute(
                 "UPDATE key_requests SET product='alpha-desk' "
                 "WHERE LOWER(purpose) LIKE '%alpha desk%'")
+        # 2026-10-20：Alpha Desk 申请单 -> 网站账号绑定。
+        for col, ddl in (
+            ('bound_user_id', "ALTER TABLE key_requests ADD COLUMN bound_user_id TEXT NOT NULL DEFAULT ''"),
+            ('tenant', "ALTER TABLE key_requests ADD COLUMN tenant TEXT NOT NULL DEFAULT ''"),
+            ('claim_bound_at', "ALTER TABLE key_requests ADD COLUMN claim_bound_at INTEGER"),
+        ):
+            if col not in cols:
+                conn.execute(ddl)
 
     def _conn(self):
         c = sqlite3.connect(self.path)
@@ -896,16 +977,21 @@ class QuotaStore:
     # -- API key 申请单 ------------------------------------------------
 
     def create_request(self, req_no, name, contact, purpose, want_groups, volume, ip='',
-                       product=''):
+                       product='', bound_user_id=''):
         product = normalize_product(product, purpose)
+        bound_user_id = str(bound_user_id or '').strip()
+        tenant = ('u_' + bound_user_id) if bound_user_id else ''
         with self.lock:
             c = self._conn()
+            now = int(time.time())
             cur = c.execute(
                 'INSERT INTO key_requests(req_no,name,contact,purpose,product,want_groups,volume,'
-                'status,created_at,client_ip) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                'status,created_at,client_ip,bound_user_id,tenant,claim_bound_at) '
+                'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
                 (req_no, name, contact or '', purpose or '', product,
                  json.dumps(list(want_groups or []), ensure_ascii=False),
-                 volume or '', 'pending', int(time.time()), ip or ''))
+                 volume or '', 'pending', now, ip or '',
+                 bound_user_id, tenant, now if bound_user_id else None))
             rid = cur.lastrowid
             c.commit()
             c.close()
@@ -975,6 +1061,28 @@ class QuotaStore:
                       (int(time.time()), int(req_id)))
             c.commit()
             c.close()
+
+    def bind_request(self, req_id, user_id):
+        """把申请单绑定到网站 user id（幂等；不同用户返回 False）。"""
+        user_id = str(user_id or '').strip()
+        with self.lock:
+            c = self._conn()
+            row = c.execute('SELECT bound_user_id FROM key_requests WHERE id=?',
+                            (int(req_id),)).fetchone()
+            if not row:
+                c.close()
+                return None
+            current = row['bound_user_id'] or ''
+            if current and current != user_id:
+                c.close()
+                return False
+            now = int(time.time())
+            c.execute('UPDATE key_requests SET bound_user_id=?, tenant=?, claim_bound_at=? '
+                      'WHERE id=?',
+                      (user_id, 'u_' + user_id, now, int(req_id)))
+            c.commit()
+            c.close()
+            return True
 
     # -- 申请单时间线 --------------------------------------------------
 
@@ -1535,6 +1643,61 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
                 return last
         return (self.client_address or ('?', 0))[0]
 
+    # ── 网站账号身份绑定（HMAC）────────────────────────────────────
+    #
+    # 网站 /api/key-request 代理在申请时带 apply 身份头，claim 路由在领取时
+    # 带 pickup 身份头。两端共享 ALPHA_CLAIM_SECRET；quota 不信任自报 user id。
+    # 消息：alpha-desk:v1:<action>:<user_id>:<req_no or '-'>:<unix-seconds>
+
+    _CLAIM_USER_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
+
+    def _claim_secret(self):
+        return (os.environ.get('ALPHA_CLAIM_SECRET') or '').strip()
+
+    def _legacy_claim_allowed(self):
+        raw = (os.environ.get('ALPHA_LEGACY_CLAIM') or '').strip().lower()
+        if raw in ('1', 'true', 'yes', 'on'):
+            return True
+        if raw in ('0', 'false', 'no', 'off'):
+            return False
+        return bool(self.server.cfg.current().get('alpha_legacy_claim'))
+
+    def _verify_claim_identity(self, action, req_no=''):
+        """→ (user_id | None, error | None)；error=(status, code, hint)。"""
+        uid = (self.headers.get('X-Alpha-User-Id') or '').strip()
+        ts_raw = (self.headers.get('X-Alpha-User-Ts') or '').strip()
+        sig = (self.headers.get('X-Alpha-User-Sig') or '').strip().lower()
+        if not (uid or ts_raw or sig):
+            return None, None
+        if not self._claim_secret():
+            return None, (503, 'identity_not_configured',
+                          '服务端未配置 ALPHA_CLAIM_SECRET，不能校验领取身份')
+        if not (uid and ts_raw and sig):
+            return None, (401, 'identity_incomplete', '身份头不完整')
+        if not self._CLAIM_USER_RE.fullmatch(uid):
+            return None, (401, 'identity_invalid', '身份头格式错误')
+        if not re.fullmatch(r'[0-9a-f]{64}', sig):
+            return None, (401, 'identity_invalid', '身份签名格式错误')
+        try:
+            ts = int(ts_raw)
+        except (TypeError, ValueError):
+            return None, (401, 'identity_invalid', '身份时间戳格式错误')
+        ttl = int(self.server.cfg.current().get('claim_identity_ttl') or 300)
+        ttl = max(30, min(ttl, 3600))
+        if abs(int(time.time()) - ts) > ttl:
+            return None, (401, 'identity_expired', '身份头已过期，请重新提交')
+        message = 'alpha-desk:v1:%s:%s:%s:%s' % (
+            action, uid, (req_no or '-').upper(), ts_raw)
+        expected = hmac.new(self._claim_secret().encode('utf-8'),
+                            message.encode('utf-8'), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None, (403, 'identity_mismatch', '身份签名校验失败')
+        return uid, None
+
+    def _identity_error_response(self, error):
+        status, code, hint = error
+        return self._json(status, {'error': code, 'hint': hint})
+
     def _cookie(self, name):
         for part in self.headers.get('Cookie', '').split(';'):
             k, _, v = part.strip().partition('=')
@@ -1861,11 +2024,12 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return self._apply_pickup(m.group(1).upper())
         if not self._authed():
             return
-        m = re.fullmatch(r'/api/requests/(\d+)/(approve|reject|reissue)', path)
+        m = re.fullmatch(r'/api/requests/(\d+)/(approve|reject|reissue|bind)', path)
         if m:
             return {'approve': self._request_approve,
                     'reject': self._request_reject,
-                    'reissue': self._request_reissue}[m.group(2)](int(m.group(1)))
+                    'reissue': self._request_reissue,
+                    'bind': self._request_bind}[m.group(2)](int(m.group(1)))
         if path == '/api/wb/decide':           # 因子升格：批准 / 否决
             return self._wb_decide()
         if path == '/api/password':
@@ -1994,6 +2158,11 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             return self._json(400, {'error': 'unknown_product',
                                     'hint': 'product 只能是 %s' % ' / '.join(REQUEST_PRODUCTS)})
         product = product_raw or infer_product(purpose)
+        # 申请时的账号绑定（可选）：网站代理会带 HMAC 身份头；CLI/匿名
+        # 申请仍允许，但 Alpha Desk 领取时会要求先绑定（见 _apply_pickup）。
+        bound_user_id, ident_err = self._verify_claim_identity('apply')
+        if ident_err:
+            return self._identity_error_response(ident_err)
         allowed = list(cfg.get('apply_groups') or [])
         want = body.get('groups') or []
         if not isinstance(want, list):
@@ -2004,14 +2173,19 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
                                     'hint': '请至少选择一个分组（可选：%s）' % ', '.join(allowed)})
         req_no = new_request_no()
         rid = self.server.store.create_request(req_no, name, contact, purpose, want, volume, ip,
-                                               product=product)
+                                               product=product, bound_user_id=bound_user_id or '')
+        binding = 'account' if bound_user_id else 'anonymous'
         self.server.store.add_event(
             rid, 'submitted', actor='applicant',
-            detail='product=%s groups=%s' % (product, ','.join(want)))
+            detail='product=%s groups=%s binding=%s' % (product, ','.join(want), binding))
         self._apply_limiter.record(ip)
+        hint = '申请已提交，等待管理员审批。请记下申请单号，审批通过后凭它领取密钥。'
+        if product == 'alpha-desk' and not bound_user_id:
+            hint += ' 本次申请未绑定网站账号；Alpha Desk claim 前需要管理员绑定。'
         return self._json(200, {
             'ok': True, 'id': rid, 'req_no': req_no, 'product': product,
-            'hint': '申请已提交，等待管理员审批。请记下申请单号，审批通过后凭它领取密钥。',
+            'binding': binding,
+            'hint': hint,
             'poll': 'GET /api/apply/' + req_no,
         })
 
@@ -2021,6 +2195,7 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         if not req:
             return self._json(404, {'error': 'not_found', 'hint': '申请单号不存在'})
         pending_tok = self._pending.peek(req_no)
+        bound = bool(req.get('bound_user_id'))
         out = {
             'req_no': req['req_no'], 'status': req['status'],
             'name': req['name'], 'product': req['product'],
@@ -2028,11 +2203,18 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
             'granted_groups': req['granted_groups'],
             'created_at': req['created_at'], 'decided_at': req['decided_at'],
             'picked_at': req['picked_at'],
+            # 不返回 user id；只暴露是否已绑定网站账号。
+            'binding': 'account' if bound else 'anonymous',
         }
         if req['status'] == 'rejected':
             out['reject_reason'] = req['reject_reason']
         if req['status'] == 'approved':
-            if pending_tok:
+            if pending_tok and req['product'] == 'alpha-desk' and not bound \
+                    and not self._legacy_claim_allowed():
+                out['claimable'] = False
+                out['binding_required'] = True
+                out['hint'] = '该申请单尚未绑定网站账号，请联系管理员在管理台绑定后再领取。'
+            elif pending_tok:
                 out['claimable'] = True
                 out['hint'] = '审批已通过，请在领取页输入申请单号获取密钥（只能领一次）'
             elif req['picked_at']:
@@ -2044,26 +2226,83 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         return self._json(200, out)
 
     def _apply_pickup(self, req_no):
-        """领取密钥（匿名，凭单号）→ 返回明文 token 与接入说明，**随即抹除**。
+        """领取密钥（Alpha Desk 必须带网站身份）→ 明文 token，**随即抹除**。
 
         用 POST 而不是 GET：GET 可能被浏览器/代理缓存或进访问日志，不该承载密钥。
+
+        身份规则（审计 P1-1：不能仅凭 reqNo 领走 license 里的 cloud_key）：
+          - product=alpha-desk：必须带合法的 pickup HMAC；申请单必须已绑定
+            同一 user id。迁移期 ALPHA_LEGACY_CLAIM=1 允许首次领取时绑定。
+          - product=api：保留旧的匿名领取（通用 API key 页面），但若带了
+            身份头则校验；已绑定的单不接受其他账号。
         """
         req = self.server.store.get_request(req_no=req_no)
         if not req:
             return self._json(404, {'error': 'not_found', 'hint': '申请单号不存在'})
         if req['status'] != 'approved':
             return self._json(409, {'error': 'not_approved', 'hint': '该申请尚未通过审批'})
+
+        user_id, ident_err = self._verify_claim_identity('pickup', req_no)
+        if ident_err:
+            return self._identity_error_response(ident_err)
+        bound = req.get('bound_user_id') or ''
+        newly_bound = False
+        if req['product'] == 'alpha-desk':
+            if not user_id:
+                return self._json(403, {
+                    'error': 'login_required',
+                    'hint': 'Alpha Desk 领取需要登录网站；请从 /alpha-desk 页面领取。',
+                })
+            if bound and bound != user_id:
+                return self._json(403, {
+                    'error': 'request_bound_to_other_user',
+                    'hint': '该申请单已绑定其他网站账号，不能领取。',
+                })
+            if not bound:
+                if not self._legacy_claim_allowed():
+                    return self._json(409, {
+                        'error': 'claim_unbound',
+                        'hint': '该申请单尚未绑定网站账号，请联系管理员绑定后再领取。',
+                    })
+                newly_bound = True
+        else:
+            if user_id:
+                if bound and bound != user_id:
+                    return self._json(403, {
+                        'error': 'request_bound_to_other_user',
+                        'hint': '该申请单已绑定其他网站账号，不能领取。',
+                    })
+                newly_bound = not bound
+
+        if newly_bound and user_id:
+            ok = self.server.store.bind_request(req['id'], user_id)
+            if ok is None:
+                return self._json(404, {'error': 'not_found'})
+            if ok is False:
+                return self._json(403, {
+                    'error': 'request_bound_to_other_user',
+                    'hint': '该申请单已绑定其他网站账号，不能领取。',
+                })
+            bound = user_id
+            self.server.store.add_event(req['id'], 'bound', actor='applicant',
+                                        detail='claim-time bind tenant=u_%s' % user_id)
+
         tok = self._pending.pop(req_no)      # ← 取走即删
         if not tok:
             return self._json(410, {'error': 'already_picked_or_expired',
                                     'hint': '密钥已被领取或已过期。请联系管理员重新发放。'})
         self.server.store.mark_picked(req['id'])
-        self.server.store.add_event(req['id'], 'picked-up', actor='applicant',
-                                    detail='key=%s' % (req['mc_key_name'] or ''))
+        self.server.store.add_event(
+            req['id'], 'picked-up', actor='applicant',
+            detail='key=%s binding=%s' % (req['mc_key_name'] or '',
+                                          'account' if bound else 'anonymous'))
         groups = tok['groups']
         return self._json(200, {
             'ok': True, 'req_no': req_no, 'key_name': tok['key_name'],
+            'key_id': req.get('mc_key_id') or '',
             'token': tok['token'], 'groups': groups,
+            'tenant': ('u_' + bound) if bound else '',
+            'binding': 'account' if bound else 'anonymous',
             'access': self._access_snippet(groups),
             'warning': '密钥只显示这一次，已从服务器抹除。请立即保存到你的客户端配置或密码管理器。',
         })
@@ -2220,6 +2459,37 @@ class AdminPlaneHandler(BaseHTTPRequestHandler):
         self._pending.drop(req['req_no'])
         return self._json(200, {'ok': True, 'req_no': req['req_no'], 'status': 'rejected'})
 
+    def _request_bind(self, rid):
+        """管理员把旧申请单绑定到网站 user id（迁移窗口/客服兜底）。
+
+        绑定后 Alpha Desk 领取必须由同一 user id 的登录会话发起；不同用户
+        再次绑定返回 409，不会覆盖。
+        """
+        body = self._read_json()
+        if body is None:
+            return self._json(400, {'error': 'invalid_json'})
+        user_id = str(body.get('user_id') or '').strip()
+        if not self._CLAIM_USER_RE.fullmatch(user_id):
+            return self._json(400, {'error': 'invalid_user_id',
+                                    'hint': 'user_id 只能包含字母、数字、下划线和连字符'})
+        req = self.server.store.get_request(req_id=rid)
+        if not req:
+            return self._json(404, {'error': 'not_found'})
+        if req.get('bound_user_id') and req['bound_user_id'] != user_id:
+            return self._json(409, {'error': 'already_bound',
+                                    'hint': '该申请单已绑定其他用户；如需换绑请先人工核查。'})
+        ok = self.server.store.bind_request(rid, user_id)
+        if ok is None:
+            return self._json(404, {'error': 'not_found'})
+        if ok is False:
+            return self._json(409, {'error': 'already_bound'})
+        self.server.store.add_event(int(rid), 'bound', actor=self._actor(),
+                                    detail='tenant=u_%s' % user_id)
+        return self._json(200, {
+            'ok': True, 'req_no': req['req_no'], 'tenant': 'u_' + user_id,
+            'binding': 'account',
+        })
+
     def _request_reissue(self, rid):
         """改发：建新 key（换后缀）→ 停用旧 key → 新 token 进待领取。
 
@@ -2299,6 +2569,12 @@ def main():
     ap.add_argument('--db', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'quota.db'))
     ap.add_argument('--data-port', type=int, default=None, help='覆盖数据面端口')
     ap.add_argument('--admin-port', type=int, default=None, help='覆盖管理面端口')
+    ap.add_argument('--preflight', action='store_true',
+                    help='只检查 cloud-memory tokens 目录/CAUSAL_MEMORY_ALLOW_OPEN，然后退出')
+    ap.add_argument('--tokens-dir', default=None,
+                    help='--preflight 的 tokens 目录（默认 CAUSAL_MEMORY_TOKENS_FILE）')
+    ap.add_argument('--allow-open', action='store_true',
+                    help='--preflight 时允许 CAUSAL_MEMORY_ALLOW_OPEN=1（不建议）')
     args = ap.parse_args()
 
     if not os.path.exists(args.config):
@@ -2311,6 +2587,34 @@ def main():
             raise SystemExit(f'配置文件不存在: {args.config}')
 
     cfg = Config(args.config)
+    tokens_path = (args.tokens_dir
+                   or os.environ.get('CAUSAL_MEMORY_TOKENS_FILE')
+                   or cfg.current().get('cloud_memory_tokens_path') or '')
+
+    def report_cloud_memory(ok, errors, warnings, count):
+        if ok:
+            print('[quota-platform] cloud-memory tokens: OK (%d entries)' % count)
+        else:
+            print('[quota-platform] cloud-memory tokens: FAIL', file=sys.stderr)
+        for msg in errors:
+            print('  ERROR: ' + msg, file=sys.stderr)
+        for msg in warnings:
+            print('  WARN:  ' + msg, file=sys.stderr)
+
+    if args.preflight:
+        ok, errors, warnings, count, _files = check_cloud_memory_tokens(
+            tokens_path, allow_open=args.allow_open)
+        report_cloud_memory(ok, errors, warnings, count)
+        raise SystemExit(0 if ok else 1)
+
+    if tokens_path:
+        ok, errors, warnings, count, _files = check_cloud_memory_tokens(tokens_path)
+        report_cloud_memory(ok, errors, warnings, count)
+        strict = (_truthy_env('QUOTA_CLOUD_MEMORY_STRICT')
+                  or bool(cfg.current().get('cloud_memory_strict')))
+        if not ok and strict:
+            raise SystemExit('[quota-platform] cloud-memory 启动检查失败（strict 模式）')
+
     store = QuotaStore(args.db)
     inventory = KeyInventory(cfg.current().get('mcp_settings_path', ''))
     inventory.reload()

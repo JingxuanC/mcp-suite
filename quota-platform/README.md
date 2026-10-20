@@ -35,7 +35,7 @@ python3 scripts/set_admin_password.py --list             # 看有哪些账号
 python3 scripts/set_admin_password.py --username ops --disable
 ```
 
-跑测试：`python -m unittest discover -s tests -v`（117 个用例，另见 `scripts/e2e_apply_flow.py`）
+跑测试：`python -m unittest discover -s tests -v`（120+ 个用例，另见 `scripts/e2e_apply_flow.py`）
 
 ## 管控模型
 
@@ -99,6 +99,7 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
 | `POST /api/requests/<id>/approve` | 管理 | 通过：建 key + 写档位（`groups`、`tier`） |
 | `POST /api/requests/<id>/reject` | 管理 | 拒绝（`reason` 会展示给申请人） |
 | `POST /api/requests/<id>/reissue` | 管理 | 改发：建新 key + 停用旧 key |
+| `POST /api/requests/<id>/bind` | 管理 | 把申请单绑定到网站 `user.id`（body `{"user_id":"..."}`）；已绑定其他用户返回 409 |
 | `GET /api/requests/<id>/token` | 管理 | 兜底：查看待领取的密钥，人工转发 |
 
 **申请时间线（`request_events`）**
@@ -110,6 +111,48 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
 `applicant`。事件只记录产品、分组、key 名等元数据，**绝不写入 token**。
 旧库在启动时自动建表并补 `product` 列（`ALTER TABLE` + 按 purpose 回填一次），
 无需手工迁移。
+
+**Alpha Desk 账号绑定（2026-10-20）**
+
+`/apply` 和 `/api/apply/<单号>/pickup` 在公网 `/quota/` 下可直接访问。只靠网站
+claim 路由校验 session 会被绕过，因此 quota 侧也校验：网站代理在 apply/pickup
+时带 `X-Alpha-User-Id` / `X-Alpha-User-Ts` / `X-Alpha-User-Sig`，签名是
+`HMAC-SHA256(ALPHA_CLAIM_SECRET, "alpha-desk:v1:<action>:<user_id>:<req_no or ->:<ts>")`。
+
+- `apply` 带合法身份 → 申请单写入 `bound_user_id` / `tenant=u_<id>`；不带身份仍允许
+  （`issue_license.py` 等内部工具兼容），但 Alpha Desk 领取会被拒绝。
+- `pickup`：`product == alpha-desk` 必须带合法身份，且与申请单绑定用户一致；
+  未绑定的旧单默认拒绝（409 `claim_unbound`）。迁移窗口可设
+  `ALPHA_LEGACY_CLAIM=1`，首次领取时绑定；迁移完成必须关掉。
+- 管理员可用 `POST /api/requests/<id>/bind` 手工绑定旧单。
+- `GET /api/apply/<单号>` 只返回 `binding: account|anonymous`，不泄露 user id。
+- 服务端缺 `ALPHA_CLAIM_SECRET` 时，带身份头的请求 fail-closed（503）；不会退化成
+  “信任自报 user id”。
+
+**启动前 cloud-memory 检查（fail-closed）**
+
+causal-memory 在 tokens 目录缺失/为空/不可解析时会 `auth=open`（审计 P0-2）。
+部署脚本应在启动前跑：
+
+```bash
+python3 scripts/preflight_cloud_memory.py \
+  --tokens-dir /opt/mcp-suite/causal-memory/tokens \
+  --bridge-file /opt/mcp-suite/causal-memory/tokens/cloud.json \
+  --probe-url https://causal-memory.com/memory/mcp
+```
+
+探针用假 token 请求 `/memory/mcp`，**必须 401**；200 视为 open 模式直接失败。
+`CAUSAL_MEMORY_ALLOW_OPEN=1` 默认视为错误。也可以在 `server.py` 启动时检查：
+
+```bash
+CAUSAL_MEMORY_TOKENS_FILE=/opt/mcp-suite/causal-memory/tokens \
+QUOTA_CLOUD_MEMORY_STRICT=1 \
+python3 server.py --config ... --db ...
+# 或只检查：python3 server.py --preflight --tokens-dir ...
+```
+
+容器里默认看不到宿主机 `/opt/mcp-suite/causal-memory/tokens`；要么把该目录只读
+挂进 quota 容器，要么在宿主机/部署脚本里跑 preflight。
 
 **两个刻意的设计**
 
@@ -130,9 +173,15 @@ key 库存：只读挂载 mcphub 的 `mcp_settings.json`，按 mtime 热加载�
   "apply_groups": ["data", "alpha", "memory"],          // 允许申请的分组（须与 mcphub groups 同名）
   "apply_default_tier": "paid",
   "apply_rate_hour": 3, "apply_rate_day": 10,           // 同 IP 申请频率上限
-  "apply_pickup_hours": 168                             // 审批后未领取则作废
+  "apply_pickup_hours": 168,                            // 审批后未领取则作废
+  "claim_identity_ttl": 300,                            // 网站 HMAC 身份头时间窗
+  "cloud_memory_tokens_path": "",                       // 可选：启动检查 tokens 目录
+  "cloud_memory_strict": false                          // true = 检查失败拒绝启动
 }
 ```
+
+`ALPHA_CLAIM_SECRET` 用环境变量注入，与网站同名同值；不要写进 `config.json`。
+迁移窗口的 `ALPHA_LEGACY_CLAIM=1` 也只从环境变量读。
 
 `mcphub_admin_key` 用**环境变量 `MCPHUB_ADMIN_KEY`** 注入（compose 从 `.env` 读），
 不要写进 `config.json`。它需要是一把 mcphub 的 **system + all-access** key

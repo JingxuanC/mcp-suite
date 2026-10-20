@@ -67,5 +67,8 @@
     "ml_train_rolling",
     "update_data",
     "forecast_batch"
-  ]
+  ],
+  "claim_identity_ttl": 300,
+  "cloud_memory_tokens_path": "",
+  "cloud_memory_strict": false
 }
